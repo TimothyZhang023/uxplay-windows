@@ -3,12 +3,14 @@
 #include "mdns_responder.hpp"
 #include <windows.h>
 #include <winsvc.h>
+#include <shellapi.h>
 
 #include <QProcess>
 #include <QAction>
 #include <QApplication>
 #include <QCloseEvent>
 #include <QDesktopServices>
+#include <QDebug>
 #include <QDir>
 #include <QFile>
 #include <QLabel>
@@ -29,6 +31,129 @@ struct RenameData {
     DWORD pid;
     QString newTitle;
 };
+
+namespace {
+constexpr DWORD kServiceMissing = 0;
+constexpr DWORD kBonjourStartTimeoutMs = 30000;
+constexpr DWORD kBonjourPollMs = 500;
+
+DWORD queryWindowsServiceState(const std::wstring &serviceName) {
+    SC_HANDLE hSCM = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!hSCM) {
+        qDebug() << "OpenSCManagerW failed while checking Bonjour. Error=" << GetLastError();
+        return kServiceMissing;
+    }
+
+    SC_HANDLE hSvc = OpenServiceW(hSCM, serviceName.c_str(), SERVICE_QUERY_STATUS);
+    if (!hSvc) {
+        DWORD err = GetLastError();
+        CloseServiceHandle(hSCM);
+        if (err != ERROR_SERVICE_DOES_NOT_EXIST) {
+            qDebug() << "OpenServiceW failed while checking Bonjour. Error=" << err;
+        }
+        return kServiceMissing;
+    }
+
+    SERVICE_STATUS_PROCESS status{};
+    DWORD bytesNeeded = 0;
+    DWORD state = kServiceMissing;
+    if (QueryServiceStatusEx(
+            hSvc,
+            SC_STATUS_PROCESS_INFO,
+            reinterpret_cast<LPBYTE>(&status),
+            sizeof(status),
+            &bytesNeeded)) {
+        state = status.dwCurrentState;
+    } else {
+        qDebug() << "QueryServiceStatusEx failed for Bonjour. Error=" << GetLastError();
+    }
+
+    CloseServiceHandle(hSvc);
+    CloseServiceHandle(hSCM);
+    return state;
+}
+
+bool waitForWindowsServiceState(const std::wstring &serviceName,
+                                DWORD desiredState,
+                                DWORD timeoutMs = kBonjourStartTimeoutMs) {
+    const ULONGLONG deadline = GetTickCount64() + timeoutMs;
+    do {
+        if (queryWindowsServiceState(serviceName) == desiredState) {
+            return true;
+        }
+        Sleep(kBonjourPollMs);
+    } while (GetTickCount64() < deadline);
+
+    return queryWindowsServiceState(serviceName) == desiredState;
+}
+
+bool startWindowsServiceNormally(const std::wstring &serviceName) {
+    SC_HANDLE hSCM = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!hSCM) {
+        qDebug() << "OpenSCManagerW failed while starting Bonjour. Error=" << GetLastError();
+        return false;
+    }
+
+    SC_HANDLE hSvc = OpenServiceW(
+        hSCM,
+        serviceName.c_str(),
+        SERVICE_START | SERVICE_QUERY_STATUS);
+    if (!hSvc) {
+        qDebug() << "OpenServiceW failed while starting Bonjour. Error=" << GetLastError();
+        CloseServiceHandle(hSCM);
+        return false;
+    }
+
+    BOOL ok = StartServiceW(hSvc, 0, nullptr);
+    DWORD err = ok ? ERROR_SUCCESS : GetLastError();
+
+    CloseServiceHandle(hSvc);
+    CloseServiceHandle(hSCM);
+
+    if (ok || err == ERROR_SERVICE_ALREADY_RUNNING) {
+        return true;
+    }
+
+    qDebug() << "StartServiceW failed for Bonjour. Error=" << err;
+    return false;
+}
+
+bool startWindowsServiceElevated(const std::wstring &serviceName) {
+    std::wstring params = L"start \"" + serviceName + L"\"";
+
+    SHELLEXECUTEINFOW sei{};
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+    sei.lpVerb = L"runas";
+    sei.lpFile = L"sc.exe";
+    sei.lpParameters = params.c_str();
+    sei.nShow = SW_HIDE;
+
+    if (!ShellExecuteExW(&sei)) {
+        qDebug() << "ShellExecuteExW(runas sc start Bonjour) failed. Error=" << GetLastError();
+        return false;
+    }
+
+    if (sei.hProcess) {
+        WaitForSingleObject(sei.hProcess, kBonjourStartTimeoutMs);
+        CloseHandle(sei.hProcess);
+    }
+
+    return waitForWindowsServiceState(serviceName, SERVICE_RUNNING, 10000);
+}
+
+QString bonjourStateText(DWORD state) {
+    switch (state) {
+    case SERVICE_RUNNING: return "running";
+    case SERVICE_START_PENDING: return "starting";
+    case SERVICE_STOP_PENDING: return "stopping";
+    case SERVICE_STOPPED: return "stopped";
+    case SERVICE_PAUSED: return "paused";
+    case kServiceMissing: return "missing";
+    default: return QString("state %1").arg(state);
+    }
+}
+} // namespace
 
 // Callback method that Windows calls for every opened window
 BOOL CALLBACK EnumWindowsProcRename(HWND hwnd, LPARAM lParam) {
@@ -56,7 +181,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     setupTray();
     setupUI();
 
-    // If Bonjour Service is missing, we must install it; otherwise we exit.
+    // Bonjour must be installed and running before UxPlay starts; otherwise
+    // DNSServiceRegister can fail silently when BLE discovery is enabled.
     if (ensureBonjourServiceInstalled()) {
         startServer();
     } else {
@@ -300,13 +426,12 @@ void MainWindow::startServer() {
 
     applyRendererAndFullscreenArgs(args);
 
-    // Only add -ble and start beacon if checkbox is checked
-    if (!m_bleCheckbox) return;
-    if (m_bleCheckbox->isChecked()) {
+    // Only add -ble and start beacon if checkbox is checked.
+    // Bonjour/mDNS is still mandatory for reliable macOS discovery.
+    if (m_bleCheckbox && m_bleCheckbox->isChecked()) {
         QString bleFilePath = QDir::toNativeSeparators(appData + "/uxplay_status.ble");
         args << "-ble" << bleFilePath;
-        startBluetoothBeacon
-    (bleFilePath);
+        startBluetoothBeacon(bleFilePath);
     } else {
         stopBluetoothBeacon();
     }
@@ -316,6 +441,7 @@ void MainWindow::startServer() {
 
     connect(m_worker, &AirPlayWorker::started, this, &MainWindow::onAirplayStarted);
     connect(m_worker, &AirPlayWorker::stopped, this, &MainWindow::onAirplayStopped);
+    connect(m_worker, &AirPlayWorker::errorOccurred, this, &MainWindow::onAirplayError);
     connect(m_worker, &AirPlayWorker::finished, m_worker, &QObject::deleteLater);
 
     m_worker->start();
@@ -469,26 +595,67 @@ void MainWindow::updateStatus() {
 }
 
 bool MainWindow::isWindowsServicePresent(const std::wstring& serviceName) const {
-    SC_HANDLE hSCM = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
-    if (!hSCM) return false;
-
-    SC_HANDLE hSvc = OpenServiceW(hSCM, serviceName.c_str(), SERVICE_QUERY_STATUS);
-    if (!hSvc) {
-        DWORD err = GetLastError();
-        CloseServiceHandle(hSCM);
-        return err != ERROR_SERVICE_DOES_NOT_EXIST;
-    }
-
-    CloseServiceHandle(hSvc);
-    CloseServiceHandle(hSCM);
-    return true;
+    return queryWindowsServiceState(serviceName) != kServiceMissing;
 }
 
 bool MainWindow::ensureBonjourServiceInstalled() {
     const std::wstring serviceName = L"Bonjour Service";
 
-    if (isWindowsServicePresent(serviceName)) {
+    DWORD state = queryWindowsServiceState(serviceName);
+    if (state == SERVICE_RUNNING) {
         return true;
+    }
+
+    if (state == SERVICE_START_PENDING &&
+        waitForWindowsServiceState(serviceName, SERVICE_RUNNING)) {
+        return true;
+    }
+
+    if (state != kServiceMissing) {
+        int choice = QMessageBox::question(
+            this,
+            "Bonjour Service Not Running",
+            QString("Bonjour Service is installed but %1. macOS discovery "
+                    "will not work until Bonjour/mDNS is running.\n\n"
+                    "Start Bonjour Service now?").arg(bonjourStateText(state)),
+            QMessageBox::Yes | QMessageBox::No,
+            QMessageBox::Yes
+        );
+
+        if (choice != QMessageBox::Yes) {
+            QMessageBox::critical(
+                this,
+                "Bonjour Service Not Running",
+                "Bonjour Service is required for AirPlay discovery. "
+                "The application will now exit."
+            );
+            return false;
+        }
+
+        if (startWindowsServiceNormally(serviceName) &&
+            waitForWindowsServiceState(serviceName, SERVICE_RUNNING)) {
+            return true;
+        }
+
+        QMessageBox::information(
+            this,
+            "Admin Permission Required",
+            "Windows needs administrator permission to start Bonjour Service. "
+            "Please approve the UAC prompt."
+        );
+
+        if (startWindowsServiceElevated(serviceName) &&
+            waitForWindowsServiceState(serviceName, SERVICE_RUNNING, 10000)) {
+            return true;
+        }
+
+        QMessageBox::critical(
+            this,
+            "Bonjour Start Failed",
+            "Bonjour Service could not be started. macOS will not be able "
+            "to discover uxplay-windows until the service is running."
+        );
+        return false;
     }
 
     int choice = QMessageBox::question(
@@ -517,8 +684,11 @@ bool MainWindow::ensureBonjourServiceInstalled() {
 
     int rc = mdns::MdnsResponder::install();
 
-    // Re-check after install to be safe.
-    if (rc == 0 && isWindowsServicePresent(serviceName)) {
+    // Re-check after install to be safe. mDNSResponder -install should also
+    // start the service; if it is still starting, wait a short time.
+    if (rc == 0 &&
+        (queryWindowsServiceState(serviceName) == SERVICE_RUNNING ||
+         waitForWindowsServiceState(serviceName, SERVICE_RUNNING, 15000))) {
         QMessageBox::information(
             this,
             "Installation Complete",
@@ -531,7 +701,7 @@ bool MainWindow::ensureBonjourServiceInstalled() {
     QMessageBox::critical(
         this,
         "Installation Failed",
-        "Failed to install 'Bonjour Service'.\n\n"
+        "Failed to install or start 'Bonjour Service'.\n\n"
         "The application will now exit."
     );
     return false;
