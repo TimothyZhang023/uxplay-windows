@@ -11,6 +11,11 @@ on:
         default: false
         required: false
         type: boolean
+      release_tag:
+        description: 'Optional tag to publish a GitHub Release, for example v2.1.1-mdns. Leave empty to build artifacts only.'
+        default: ''
+        required: false
+        type: string
 
 jobs:
   build:
@@ -148,14 +153,50 @@ jobs:
             -out uxplaywindows-installer.msi `
             -ext WixToolset.UI.wixext
 
+      - name: package portable zip
+        shell: powershell
+        run: |
+          Compress-Archive -Path release\* -DestinationPath uxplay-windows.zip -Force
+
       - name: upload msi artifact
         uses: actions/upload-artifact@v5
         with:
           name: uxplay-windows-msi
           path: uxplaywindows-installer.msi
 
-      - name: uploading artifact
+      - name: uploading portable artifact
         uses: actions/upload-artifact@v5
         with:
           name: uxplay-windows
           path: release/**
+
+      - name: upload portable zip artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: uxplay-windows-zip
+          path: uxplay-windows.zip
+
+      - name: compute release tag
+        id: release_tag
+        shell: powershell
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch" -and "${{ inputs.release_tag }}" -ne "") {
+            "tag=${{ inputs.release_tag }}" >> $env:GITHUB_OUTPUT
+          } elseif ("${{ github.event_name }}" -eq "push" -and "${{ github.ref }}" -eq "refs/heads/main") {
+            "tag=v2.1.1-mdns-${{ github.run_number }}" >> $env:GITHUB_OUTPUT
+          } else {
+            "tag=" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: publish github release
+        if: ${{ steps.release_tag.outputs.tag != '' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_tag.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: uxplay-windows ${{ steps.release_tag.outputs.tag }}
+          make_latest: true
+          generate_release_notes: true
+          files: |
+            uxplaywindows-installer.msi
+            uxplay-windows.zip
