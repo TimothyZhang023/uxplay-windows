@@ -1,4 +1,5 @@
 name: build uxplay-windows
+# Pushes to main publish a dated mdns-fix release automatically.
 
 on:
   push:
