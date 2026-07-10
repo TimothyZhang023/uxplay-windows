@@ -1,8 +1,11 @@
 name: build uxplay-windows
-# Pushes to main publish a dated mdns-fix release automatically.
+# Pull requests build artifacts; pushes to main also publish a release.
 
 on:
   push:
+    branches:
+      - main
+  pull_request:
     branches:
       - main
   workflow_dispatch:
@@ -21,7 +24,9 @@ on:
 jobs:
   build:
     name: build uxplay
-    runs-on: windows-latest
+    # mDNSResponder's Visual Studio projects are validated with VS 2022.
+    # Pin the image so a windows-latest migration cannot break releases.
+    runs-on: windows-2022
     permissions:
       contents: write
 
@@ -31,6 +36,9 @@ jobs:
         with:
           submodules: recursive
           fetch-depth: 1
+
+      - name: configure MSBuild
+        uses: microsoft/setup-msbuild@v2
 
       - name: cache mDNSResponder build artifacts (Bonjour SDK)
         uses: actions/cache@v5
@@ -141,6 +149,7 @@ jobs:
         run: |
           $env:PATH += ";$env:USERPROFILE\.dotnet\tools"
           if (-not (Get-Command wix -ErrorAction SilentlyContinue)) { dotnet tool install --global wix }
+          wix extension add WixToolset.Firewall.wixext -acceptEula wix7
 
       - name: build msi installer
         shell: powershell
@@ -152,7 +161,8 @@ jobs:
           wix build -acceptEula wix7 product.wxs `
             -arch x64 `
             -out uxplaywindows-installer.msi `
-            -ext WixToolset.UI.wixext
+            -ext WixToolset.UI.wixext `
+            -ext WixToolset.Firewall.wixext
 
       - name: package portable zip
         shell: powershell
@@ -184,7 +194,7 @@ jobs:
           if ("${{ github.event_name }}" -eq "workflow_dispatch" -and "${{ inputs.release_tag }}" -ne "") {
             "tag=${{ inputs.release_tag }}" >> $env:GITHUB_OUTPUT
           } elseif ("${{ github.event_name }}" -eq "push" -and "${{ github.ref }}" -eq "refs/heads/main") {
-            "tag=v2.1.1-mdns-${{ github.run_number }}" >> $env:GITHUB_OUTPUT
+            "tag=v2.1.2-mdns-${{ github.run_number }}" >> $env:GITHUB_OUTPUT
           } else {
             "tag=" >> $env:GITHUB_OUTPUT
           }

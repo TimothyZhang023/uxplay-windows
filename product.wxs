@@ -1,13 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
-     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
+     xmlns:firewall="http://wixtoolset.org/schemas/v4/wxs/firewall">
       
   <!-- version number is mayor.minor.zero.uxplayversion -->
   <Package
     Id="uxplaywindows"
     Name="uxplay-windows"
     Manufacturer="leapbtw"
-    Version="2.1.1.1736"
+    Version="2.1.2.1736"
     UpgradeCode="00000eaf-dcca-458f-ab77-aaef11ce4ba8"
     Language="1033"
     Scope="perMachine">
@@ -25,6 +26,7 @@
     <Feature Id="MainFeature" Title="uxplay-windows" Level="1">
       <ComponentGroupRef Id="AppFiles" />
       <ComponentGroupRef Id="AppExe" />
+      <ComponentRef Id="BonjourResponderComponent" />
     </Feature>
 
     <Feature
@@ -37,7 +39,7 @@
 
     <ComponentGroup Id="AppFiles" Directory="INSTALLDIR">
       <Files Include="./release/**">
-        <Exclude Files="**/*.pdb;**/uxplay-windows.exe" />
+        <Exclude Files="**/*.pdb;**/uxplay-windows.exe;**/mDNSResponder.exe" />
       </Files>
     </ComponentGroup>
 
@@ -47,6 +49,12 @@
         <File Id="AppExeFile"
               Source="./release/uxplay-windows.exe"
               KeyPath="yes">
+          <firewall:FirewallException
+            Id="UxPlayFirewallException"
+            Name="uxplay-windows AirPlay receiver"
+            Description="Allow AirPlay connections from the local network"
+            Profile="all"
+            Scope="localSubnet" />
           <Shortcut
             Name="uxplay-windows"
             Directory="ProgramMenuFolder"
@@ -55,6 +63,21 @@
         </File>
       </Component>
     </ComponentGroup>
+
+    <Component Id="BonjourResponderComponent"
+               Guid="2bb1f278-3529-4e49-965a-d33dd76158db"
+               Directory="INSTALLDIR">
+      <File Id="BonjourResponderFile"
+            Source="./release/mDNSResponder.exe"
+            KeyPath="yes">
+        <firewall:FirewallException
+          Id="BonjourFirewallException"
+          Name="uxplay-windows Bonjour discovery"
+          Description="Allow Bonjour discovery from the local network"
+          Profile="all"
+          Scope="localSubnet" />
+      </File>
+    </Component>
 
     <StandardDirectory Id="DesktopFolder" />
 
