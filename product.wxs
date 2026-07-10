@@ -14,7 +14,7 @@
     Scope="perMachine">
 
     <MajorUpgrade AllowDowngrades="yes" />
-    <WixVariable Id="WixUILicenseRtf" Value="LICENSE.rtf" />
+    <WixVariable Id="WixUILicenseRtf" Value="./release/LICENSE.rtf" />
     <MediaTemplate EmbedCab="yes" />
 
     <ui:WixUI Id="WixUI_FeatureTree" />
