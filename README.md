@@ -35,7 +35,9 @@ You can also set it to run automatically when your PC starts
 >
 > Just click on `More info` and it will let you install. It complains because the executable is not signed. If you don't trust this software you can always build it yourself! See below.
 >
-> If prompted by Windows Firewall, please **allow** uxplay-windows to ensure it functions properly.
+> The MSI installer adds local-network firewall rules for uxplay-windows and
+> Bonjour discovery. Portable ZIP users must allow both `uxplay-windows.exe`
+> and `mDNSResponder.exe` when prompted by Windows Firewall.
 
 
 > [!NOTE]

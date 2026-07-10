@@ -1,9 +1,9 @@
 name: build uxplay-windows-arm64
 
 on:
-  push:
-    branches:
-      - main
+  # ARM64 packaging is incomplete in this branch (its dependency list and
+  # release script are not present), so keep it opt-in instead of making every
+  # main build red.
   workflow_dispatch:
     inputs:
       tmate_debug_enabled:

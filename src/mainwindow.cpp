@@ -543,6 +543,27 @@ void MainWindow::startBluetoothBeacon(const QString &path) {
         qDebug() << "[beacon output]" << m_beacon->readAll().trimmed();
     });
 
+    connect(m_beacon, &QProcess::errorOccurred, this,
+            [this](QProcess::ProcessError error) {
+        qWarning() << "Bluetooth beacon process error:" << error
+                   << (m_beacon ? m_beacon->errorString() : QString());
+        if (m_tray) {
+            m_tray->showMessage(
+                "Bluetooth discovery unavailable",
+                "The Bluetooth beacon could not be started. Bonjour/mDNS "
+                "discovery will still be used.",
+                QSystemTrayIcon::Warning,
+                5000);
+        }
+    });
+
+    connect(m_beacon,
+            QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this,
+            [](int exitCode, QProcess::ExitStatus exitStatus) {
+        qWarning() << "Bluetooth beacon exited:" << exitCode << exitStatus;
+    });
+
     // Pass the explicit path to the beacon file
     m_beacon->start(exe, {"--path", path});
     qDebug() << "Beacon process started watching:" << path;
