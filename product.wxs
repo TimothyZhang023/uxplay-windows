@@ -8,12 +8,13 @@
     Id="uxplaywindows"
     Name="uxplay-windows"
     Manufacturer="leapbtw"
-    Version="2.1.2.1736"
+    Version="2.1.3.1736"
     UpgradeCode="00000eaf-dcca-458f-ab77-aaef11ce4ba8"
     Language="1033"
     Scope="perMachine">
 
-    <MajorUpgrade AllowDowngrades="yes" />
+    <MajorUpgrade
+      DowngradeErrorMessage="A newer version of uxplay-windows is already installed." />
     <WixVariable Id="WixUILicenseRtf" Value="./release/LICENSE.rtf" />
     <MediaTemplate EmbedCab="yes" />
 
@@ -26,20 +27,20 @@
     <Feature Id="MainFeature" Title="uxplay-windows" Level="1">
       <ComponentGroupRef Id="AppFiles" />
       <ComponentGroupRef Id="AppExe" />
+      <ComponentRef Id="EngineComponent" />
       <ComponentRef Id="BonjourResponderComponent" />
-    </Feature>
-
-    <Feature
-      Id="DesktopShortcuts"
-      Title="Desktop Shortcut"
-      Description="Create a shortcut on the desktop"
-      Level="1">
-      <ComponentRef Id="DesktopShortcutComponent" />
+      <Feature
+        Id="DesktopShortcuts"
+        Title="Desktop Shortcut"
+        Description="Create a shortcut on the desktop"
+        Level="1">
+        <ComponentRef Id="DesktopShortcutComponent" />
+      </Feature>
     </Feature>
 
     <ComponentGroup Id="AppFiles" Directory="INSTALLDIR">
       <Files Include="./release/**">
-        <Exclude Files="**/*.pdb;**/uxplay-windows.exe;**/mDNSResponder.exe" />
+        <Exclude Files="**/*.pdb;**/uxplay-windows.exe;**/uxplay-engine.exe;**/mDNSResponder.exe" />
       </Files>
     </ComponentGroup>
 
@@ -49,12 +50,6 @@
         <File Id="AppExeFile"
               Source="./release/uxplay-windows.exe"
               KeyPath="yes">
-          <firewall:FirewallException
-            Id="UxPlayFirewallException"
-            Name="uxplay-windows AirPlay receiver"
-            Description="Allow AirPlay connections from the local network"
-            Profile="all"
-            Scope="localSubnet" />
           <Shortcut
             Name="uxplay-windows"
             Directory="ProgramMenuFolder"
@@ -64,19 +59,35 @@
       </Component>
     </ComponentGroup>
 
+    <Component Id="EngineComponent"
+               Guid="909450c4-0a6d-4475-a94f-1e2205245379"
+               Directory="INSTALLDIR">
+      <File Id="EngineFile"
+            Source="./release/uxplay-engine.exe"
+            KeyPath="yes">
+        <firewall:FirewallException
+          Id="UxPlayEngineFirewallException"
+          Name="uxplay-windows AirPlay engine"
+          Description="Allow AirPlay connections from the local network"
+          Profile="all"
+          Scope="localSubnet" />
+      </File>
+    </Component>
+
     <Component Id="BonjourResponderComponent"
                Guid="2bb1f278-3529-4e49-965a-d33dd76158db"
                Directory="INSTALLDIR">
       <File Id="BonjourResponderFile"
             Source="./release/mDNSResponder.exe"
-            KeyPath="yes">
-        <firewall:FirewallException
-          Id="BonjourFirewallException"
-          Name="uxplay-windows Bonjour discovery"
-          Description="Allow Bonjour discovery from the local network"
-          Profile="all"
-          Scope="localSubnet" />
-      </File>
+            KeyPath="yes" />
+      <firewall:FirewallException
+        Id="BonjourFirewallException"
+        Name="uxplay-windows Bonjour discovery (UDP 5353)"
+        Description="Allow Bonjour multicast discovery from the local network"
+        Port="5353"
+        Protocol="udp"
+        Profile="all"
+        Scope="localSubnet" />
     </Component>
 
     <StandardDirectory Id="DesktopFolder" />
@@ -85,7 +96,7 @@
                Guid="63bb69df-4292-4053-848c-fb369bed6273"
                Directory="DesktopFolder">
       <RegistryValue
-        Root="HKCU"
+        Root="HKLM"
         Key="Software\leapbtw\uxplay-windows"
         Name="DesktopShortcut"
         Type="integer"

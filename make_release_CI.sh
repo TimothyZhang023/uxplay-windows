@@ -2,10 +2,12 @@
 set -e
 
 EXE_NAME="uxplay-windows.exe"
+ENGINE_EXE="uxplay-engine.exe"
 BEACON_EXE="uxplay-bluetooth-beacon.exe"
 DIST_DIR="$(pwd)/release"
 BUILD_DIR="$(pwd)/build"
 BEACON_DIR="$(pwd)/libuxplay/Bluetooth_LE_beacon"
+BEACON_SOURCE="$(pwd)/src/uxplay-beacon-windows.py"
 
 PROJECT_ROOT="$(pwd)"
 BONJOUR_SDK_HOME="$PROJECT_ROOT/Bonjour SDK"
@@ -28,7 +30,7 @@ echo "================================================="
 mkdir -p "$BUILD_DIR"
 cd "$BUILD_DIR"
 cmake -DCMAKE_BUILD_TYPE=Release -G Ninja \
-  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON $PROJECT_ROOT -DNO_MARCH_NATIVE=ON ..
+  $PROJECT_ROOT -DNO_MARCH_NATIVE=ON ..
 ninja
 cd ..
 
@@ -46,7 +48,7 @@ pyinstaller \
   --hidden-import=winrt.windows.storage.streams \
   --hidden-import=psutil \
   --console \
-  uxplay-beacon-windows.py \
+  "$BEACON_SOURCE" \
   --noconfirm
 
 cd ../..
@@ -57,8 +59,11 @@ echo "================================================="
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR/lib/gstreamer-1.0"
 [ -f "docs/LICENSE.rtf" ] && cp "docs/LICENSE.rtf" "$DIST_DIR/"
+[ -f "docs/THIRD_PARTY_NOTICES.md" ] && cp "docs/THIRD_PARTY_NOTICES.md" "$DIST_DIR/"
+[ -f "libuxplay/LICENSE" ] && cp "libuxplay/LICENSE" "$DIST_DIR/GPL-3.0.txt"
 
 cp "$BUILD_DIR/$EXE_NAME" "$DIST_DIR/"
+cp "$BUILD_DIR/$ENGINE_EXE" "$DIST_DIR/"
 cp "$BEACON_DIR/dist/$BEACON_EXE" "$DIST_DIR/"
 
 echo "================================================="
@@ -123,10 +128,6 @@ echo "================================================="
 cp "./Bonjour SDK/Bin/x64/dnssd.dll" release/.
 cp "./Bonjour SDK/Bin/x64/mDNSResponder.exe" release/.
 
-find $PROJECT_ROOT -name compile_commands.json
-cp ./build/compile_commands.json release/.
-
-
 echo "================================================="
 echo " 6. Copying more files over"
 echo "================================================="
@@ -134,6 +135,25 @@ find $PROJECT_ROOT -name *.ico
 mkdir -p release/resources
 cp stuff/newicon.ico release/resources/icon.ico
 cp stuff/uxplay_arguments_list.txt release/resources/uxplay_arguments_list.txt
+
+echo "================================================="
+echo " 7. Validating packaged executables and required files"
+echo "================================================="
+for required in \
+  "$DIST_DIR/$EXE_NAME" \
+  "$DIST_DIR/$ENGINE_EXE" \
+  "$DIST_DIR/$BEACON_EXE" \
+  "$DIST_DIR/dnssd.dll" \
+  "$DIST_DIR/mDNSResponder.exe" \
+  "$DIST_DIR/resources/uxplay_arguments_list.txt"; do
+  if [ ! -s "$required" ]; then
+    echo "ERROR: required release file missing or empty: $required" >&2
+    exit 1
+  fi
+done
+
+PATH="$DIST_DIR:$PATH" "$DIST_DIR/$ENGINE_EXE" -v
+"$DIST_DIR/$BEACON_EXE" --help > /dev/null
 
 echo "================================================="
 echo " ✅ Done! Package is ready in $DIST_DIR"

@@ -35,7 +35,7 @@ jobs:
         with:
           path: |
             Bonjour SDK
-          key: mdns-${{ runner.os }}-${{ hashFiles('mdnsresponder-patches/2881.patch') }}-v3
+          key: mdns-${{ runner.os }}-arm64-${{ hashFiles('mdnsresponder-patches/2881.patch') }}-v4
           restore-keys: |
             mdns-${{ runner.os }}-arm64-
 

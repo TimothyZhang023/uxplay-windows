@@ -1,6 +1,6 @@
 #include "mainwindow.h"
-#include "airplayworker.h"
 #include "mdns_responder.hpp"
+#include "single_instance.hpp"
 #include <windows.h>
 #include <winsvc.h>
 #include <shellapi.h>
@@ -12,11 +12,15 @@
 #include <QDesktopServices>
 #include <QDebug>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
+#include <QFileInfo>
 #include <QLabel>
 #include <QMenu>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QRandomGenerator>
+#include <QRegularExpression>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QStyle>
@@ -34,8 +38,8 @@ struct RenameData {
 
 namespace {
 constexpr DWORD kServiceMissing = 0;
-constexpr DWORD kBonjourStartTimeoutMs = 30000;
-constexpr DWORD kBonjourPollMs = 500;
+constexpr DWORD kBonjourStartTimeoutMs = 15000;
+constexpr DWORD kBonjourPollMs = 250;
 
 DWORD queryWindowsServiceState(const std::wstring &serviceName) {
     SC_HANDLE hSCM = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
@@ -153,6 +157,32 @@ QString bonjourStateText(DWORD state) {
     default: return QString("state %1").arg(state);
     }
 }
+
+QString stableDeviceId() {
+    QSettings settings;
+    QString deviceId = settings.value("device_id").toString().toLower();
+    static const QRegularExpression pattern(
+        QStringLiteral("^[0-9a-f]{2}(:[0-9a-f]{2}){5}$"));
+    if (pattern.match(deviceId).hasMatch()) {
+        return deviceId;
+    }
+
+    quint8 bytes[6];
+    for (quint8 &byte : bytes) {
+        byte = static_cast<quint8>(QRandomGenerator::system()->generate() & 0xff);
+    }
+    bytes[0] = static_cast<quint8>((bytes[0] | 0x02) & 0xfe); // local, unicast
+
+    QStringList parts;
+    parts.reserve(6);
+    for (quint8 byte : bytes) {
+        parts << QStringLiteral("%1").arg(byte, 2, 16, QLatin1Char('0'));
+    }
+    deviceId = parts.join(':');
+    settings.setValue("device_id", deviceId);
+    qInfo() << "Generated persistent AirPlay device ID:" << deviceId;
+    return deviceId;
+}
 } // namespace
 
 // Callback method that Windows calls for every opened window
@@ -181,14 +211,14 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     setupTray();
     setupUI();
 
-    // Bonjour must be installed and running before UxPlay starts; otherwise
-    // DNSServiceRegister can fail silently when BLE discovery is enabled.
-    if (ensureBonjourServiceInstalled()) {
-        startServer();
-    } else {
-        m_quitting = true;
-        QTimer::singleShot(0, qApp, &QCoreApplication::quit);
-        return;
+    // Bonjour is preferred, but it is not a hard startup dependency. If it is
+    // unavailable, force BLE for this session so libuxplay keeps serving.
+    m_bonjourAvailable = ensureBonjourServiceAvailable(false);
+    m_forceBleFallback = !m_bonjourAvailable;
+    startServer();
+
+    if (!m_bonjourAvailable) {
+        QTimer::singleShot(500, this, &MainWindow::showDiscoveryFallbackWarning);
     }
 }
 
@@ -221,7 +251,7 @@ QStringList MainWindow::getArgumentsFromFile() {
     if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
         QString content = QTextStream(&file).readAll().trimmed();
         file.close();
-        return content.split(" ", Qt::SkipEmptyParts);
+        return QProcess::splitCommand(content);
     }
     return QStringList() << "-n" << "uxplay-windows" << "-nh";
 }
@@ -238,6 +268,15 @@ void MainWindow::setupUI() {
     m_statusLabel = new QLabel("Initializing...", this);
     m_statusLabel->setAlignment(Qt::AlignCenter);
     layout->addWidget(m_statusLabel);
+
+    m_windowMonitorTimer = new QTimer(this);
+    connect(m_windowMonitorTimer, &QTimer::timeout, this, [this]() {
+        if (!m_running || m_enginePid == 0) return;
+        RenameData info;
+        info.pid = static_cast<DWORD>(m_enginePid);
+        info.newTitle = "AirPlay Video Stream (ALT+ENTER for Fullscreen)";
+        EnumWindows(EnumWindowsProcRename, reinterpret_cast<LPARAM>(&info));
+    });
 
     // Bluetooth Discovery Checkbox
     m_bleCheckbox = new QCheckBox("Enable Bluetooth Discovery", this);
@@ -321,6 +360,10 @@ void MainWindow::setupTray() {
     m_tray->setToolTip("uxplay-windows");
 
     m_trayMenu = new QMenu(this);
+    m_retryBonjourAction = m_trayMenu->addAction(
+        "Retry Bonjour Discovery", this, &MainWindow::retryBonjourDiscovery);
+    m_trayMenu->addAction("Open Log File", this, &MainWindow::openLogFile);
+    m_trayMenu->addSeparator();
     m_trayMenu->addAction("Quit", this, &MainWindow::quit);
     m_trayMenu->addAction("Restart", this, &MainWindow::restartApplication);
 
@@ -409,15 +452,26 @@ void MainWindow::applyRendererAndFullscreenArgs(QStringList &args) {
 }
 
 void MainWindow::startServer() {
-    if (m_worker && m_worker->isRunning()) return;
+    if (m_engine && m_engine->state() != QProcess::NotRunning) return;
+
+    if (m_engine) {
+        m_engine->deleteLater();
+        m_engine.clear();
+    }
 
     QString appData = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
     QDir().mkpath(appData);
     
     QStringList args = getArgumentsFromFile();
+
+    // Network adapter order changes frequently on Windows (VPN, Hyper-V,
+    // USB Ethernet). Keep the AirPlay DeviceID stable unless the user set -m.
+    if (!args.contains("-m")) {
+        args << "-m" << stableDeviceId();
+    }
     
-    int bleIdx = args.indexOf("-ble");
-    if (bleIdx != -1) {
+    int bleIdx = -1;
+    while ((bleIdx = args.indexOf("-ble")) != -1) {
         args.removeAt(bleIdx);
         if (bleIdx < args.size() && !args[bleIdx].startsWith("-")) {
             args.removeAt(bleIdx);
@@ -426,80 +480,170 @@ void MainWindow::startServer() {
 
     applyRendererAndFullscreenArgs(args);
 
-    // Only add -ble and start beacon if checkbox is checked.
-    // Bonjour/mDNS is still mandatory for reliable macOS discovery.
-    if (m_bleCheckbox && m_bleCheckbox->isChecked()) {
+    // BLE is user-selectable during normal operation and is forced only for
+    // this process when Bonjour is unavailable. Passing -ble also tells
+    // libuxplay not to abort when DNS-SD registration fails.
+    const bool useBle = m_forceBleFallback ||
+                        (m_bleCheckbox && m_bleCheckbox->isChecked());
+    m_bleAvailable = false;
+    if (useBle) {
         QString bleFilePath = QDir::toNativeSeparators(appData + "/uxplay_status.ble");
-        args << "-ble" << bleFilePath;
-        startBluetoothBeacon(bleFilePath);
+        m_bleAvailable = startBluetoothBeacon(bleFilePath);
+        if (!m_bleAvailable) scheduleBluetoothBeaconRestart();
+        if (m_bleAvailable || m_forceBleFallback) {
+            // Forced fallback deliberately keeps -ble even if the advertiser
+            // is unavailable: the user's requested behavior is to keep the
+            // receiver listening and show a degraded-discovery warning.
+            args << "-ble" << bleFilePath;
+        }
     } else {
         stopBluetoothBeacon();
     }
 
-    m_worker = new AirPlayWorker(this);
-    m_worker->setArgs(args);
+    const QString enginePath = QApplication::applicationDirPath() + "/uxplay-engine.exe";
+    if (!QFileInfo::exists(enginePath)) {
+        m_starting = false;
+        m_running = false;
+        updateStatus();
+        QMessageBox::critical(
+            this,
+            "UxPlay Engine Missing",
+            "uxplay-engine.exe is missing. Reinstall uxplay-windows using the MSI package."
+        );
+        return;
+    }
 
-    connect(m_worker, &AirPlayWorker::started, this, &MainWindow::onAirplayStarted);
-    connect(m_worker, &AirPlayWorker::stopped, this, &MainWindow::onAirplayStopped);
-    connect(m_worker, &AirPlayWorker::errorOccurred, this, &MainWindow::onAirplayError);
-    connect(m_worker, &AirPlayWorker::finished, m_worker, &QObject::deleteLater);
+    auto *engine = new QProcess(this);
+    m_engine = engine;
+    m_engineOutputBuffer.clear();
+    engine->setProgram(enginePath);
+    engine->setArguments(args);
+    engine->setWorkingDirectory(QApplication::applicationDirPath());
+    engine->setProcessChannelMode(QProcess::MergedChannels);
+#ifdef _WIN32
+    engine->setCreateProcessArgumentsModifier(
+        [](QProcess::CreateProcessArguments *arguments) {
+            arguments->flags |= CREATE_NO_WINDOW;
+        });
+#endif
 
-    m_worker->start();
+    connect(engine, &QProcess::started, this, [this, engine]() {
+        if (m_engine != engine) return;
+        m_enginePid = engine->processId();
+        m_starting = true;
+        m_running = false;
+        updateStatus();
+        qInfo() << "UxPlay engine process started, pid=" << m_enginePid;
+    });
+    connect(engine, &QProcess::readyRead, this,
+            [this, engine]() { handleEngineOutput(engine); });
+    connect(engine, &QProcess::errorOccurred, this,
+            [this, engine](QProcess::ProcessError error) {
+        if (m_engine != engine) return;
+        qWarning() << "UxPlay engine process error:" << error << engine->errorString();
+        if (m_tray) {
+            m_tray->showMessage(
+                "UxPlay engine error",
+                engine->errorString(),
+                QSystemTrayIcon::Warning,
+                5000);
+        }
+        // Qt does not emit finished() when CreateProcess itself fails.
+        if (error == QProcess::FailedToStart && m_engine == engine) {
+            m_engine.clear();
+            m_engineOutputBuffer.clear();
+            m_enginePid = 0;
+            m_starting = false;
+            m_running = false;
+            updateStatus();
+            engine->deleteLater();
+            scheduleEngineRestart();
+        }
+    });
+    connect(engine,
+            QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this,
+            [this, engine](int exitCode, QProcess::ExitStatus exitStatus) {
+        qWarning() << "UxPlay engine exited:" << exitCode << exitStatus;
+        const bool wasCurrentEngine = (m_engine == engine);
+        if (!wasCurrentEngine) {
+            engine->deleteLater();
+            return;
+        }
+
+        m_engine.clear();
+        m_engineOutputBuffer.clear();
+        m_enginePid = 0;
+        m_starting = false;
+        m_running = false;
+        updateStatus();
+        if (m_windowMonitorTimer) m_windowMonitorTimer->stop();
+        engine->deleteLater();
+        scheduleEngineRestart();
+    });
+
+    m_starting = true;
+    m_running = false;
+    updateStatus();
+    engine->start();
 }
 
 void MainWindow::stopServer() {
     stopBluetoothBeacon();
-    if (m_worker) {
-        m_worker->disconnect();
-        if (m_worker->isRunning()) {
-            QMetaObject::invokeMethod(m_worker, &AirPlayWorker::stopAirplay, Qt::QueuedConnection);
-            if (!m_worker->wait(1000)) {
-                m_worker->terminate();
+    if (m_windowMonitorTimer) m_windowMonitorTimer->stop();
+    if (m_engine) {
+        QProcess *engine = m_engine.data();
+        m_engine.clear();
+        disconnect(engine, nullptr, this, nullptr);
+        if (engine->state() != QProcess::NotRunning) {
+            engine->terminate();
+            if (!engine->waitForFinished(3000)) {
+                qWarning() << "UxPlay engine did not exit; killing child process";
+                engine->kill();
+                engine->waitForFinished(1000);
             }
         }
-        m_worker = nullptr;
+        engine->deleteLater();
     }
+    m_enginePid = 0;
+    m_engineOutputBuffer.clear();
+    m_starting = false;
     m_running = false;
     updateStatus();
 }
 
+void MainWindow::handleEngineOutput(QProcess *engine) {
+    if (!engine) return;
+    const QByteArray output = engine->readAll();
+    if (output.isEmpty()) return;
 
-void MainWindow::onAirplayStarted() {
+    qInfo().noquote() << "[engine]" << QString::fromLocal8Bit(output).trimmed();
+    m_engineOutputBuffer += output;
+    if (!m_running && m_engineOutputBuffer.contains("Initialized server socket(s)")) {
+        markEngineReady();
+    }
+    if (m_engineOutputBuffer.size() > 16384) {
+        m_engineOutputBuffer = m_engineOutputBuffer.right(4096);
+    }
+}
+
+void MainWindow::markEngineReady() {
+    m_starting = false;
     m_running = true;
+    m_restartDelayMs = 1000;
     updateStatus();
+    if (m_windowMonitorTimer) m_windowMonitorTimer->start(2000);
+    qInfo() << "UxPlay engine is listening";
+}
 
-    // rename video window when it pops up
-    printf("onAirplayStarted()!\n");
-    QTimer *monitorTimer = new QTimer(this);
-    connect(monitorTimer, &QTimer::timeout, this, [this, monitorTimer]() {
-        if (!m_running) {
-            monitorTimer->stop();
-            monitorTimer->deleteLater();
-            return;
-        }
-
-        RenameData info;
-        info.pid = GetCurrentProcessId();
-        info.newTitle = "AirPlay Video Stream (ALT+ENTER for Fullscreen)"; 
-
-        EnumWindows(EnumWindowsProcRename, reinterpret_cast<LPARAM>(&info));
+void MainWindow::scheduleEngineRestart() {
+    if (m_quitting) return;
+    const int delay = m_restartDelayMs;
+    m_restartDelayMs = qMin(m_restartDelayMs * 2, 30000);
+    qWarning() << "Restarting UxPlay engine in" << delay << "ms";
+    QTimer::singleShot(delay, this, [this]() {
+        if (!m_quitting) startServer();
     });
-    monitorTimer->start(5000);
-
-}
-
-void MainWindow::onAirplayStopped() {
-    m_running = false;
-    updateStatus();
-    
-    if (!m_quitting) {
-        qDebug() << "Session ended, restarting server to stay ready...";
-        QTimer::singleShot(1000, this, &MainWindow::startServer);
-    }
-}
-
-void MainWindow::onAirplayError(const QString &message) {
-    m_tray->showMessage("uxplay-windows", message, QSystemTrayIcon::Warning, 3000);
 }
 
 void MainWindow::toggleAutostart() {
@@ -525,65 +669,153 @@ void MainWindow::setAutostart(bool enabled) {
     }
 }
 
-void MainWindow::startBluetoothBeacon(const QString &path) {
+bool MainWindow::startBluetoothBeacon(const QString &path) {
+    m_blePath = path;
     if (m_beacon && m_beacon->state() != QProcess::NotRunning)
-        return;
+        return true;
+
+    if (m_beacon) {
+        stopBluetoothBeacon();
+    }
 
     QString exe = QApplication::applicationDirPath() + "/uxplay-bluetooth-beacon.exe";
     if (!QFile::exists(exe)) {
-        qDebug() << "uxplay-bluetooth-beacon.exe not found";
-        return;
+        qWarning() << "uxplay-bluetooth-beacon.exe not found:" << exe;
+        return false;
     }
 
-    m_beacon = new QProcess(this);
-    m_beacon->setProcessChannelMode(QProcess::MergedChannels);
+    auto *beacon = new QProcess(this);
+    m_beacon = beacon;
+    beacon->setProcessChannelMode(QProcess::MergedChannels);
+#ifdef _WIN32
+    beacon->setCreateProcessArgumentsModifier(
+        [](QProcess::CreateProcessArguments *arguments) {
+            arguments->flags |= CREATE_NO_WINDOW;
+        });
+#endif
 
-    connect(m_beacon, &QProcess::readyRead, this, [this]() {
-        // Forward beacon logs to our debug console
-        qDebug() << "[beacon output]" << m_beacon->readAll().trimmed();
-    });
-
-    connect(m_beacon, &QProcess::errorOccurred, this,
-            [this](QProcess::ProcessError error) {
+    connect(beacon, &QProcess::errorOccurred, this,
+            [this, beacon](QProcess::ProcessError error) {
         qWarning() << "Bluetooth beacon process error:" << error
-                   << (m_beacon ? m_beacon->errorString() : QString());
+                   << beacon->errorString();
         if (m_tray) {
             m_tray->showMessage(
                 "Bluetooth discovery unavailable",
-                "The Bluetooth beacon could not be started. Bonjour/mDNS "
-                "discovery will still be used.",
+                m_bonjourAvailable
+                    ? "The Bluetooth beacon could not be started. Bonjour discovery is still active."
+                    : "Both Bonjour and Bluetooth discovery are unavailable. The server is still running; retry Bonjour from the tray menu.",
                 QSystemTrayIcon::Warning,
                 5000);
         }
+        m_bleAvailable = false;
+        updateStatus();
     });
 
-    connect(m_beacon,
+    connect(beacon,
             QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this,
-            [](int exitCode, QProcess::ExitStatus exitStatus) {
+            [this, beacon](int exitCode, QProcess::ExitStatus exitStatus) {
         qWarning() << "Bluetooth beacon exited:" << exitCode << exitStatus;
+        if (m_beacon != beacon) {
+            beacon->deleteLater();
+            return;
+        }
+        m_beacon.clear();
+        m_bleAvailable = false;
+        updateStatus();
+        beacon->deleteLater();
+        scheduleBluetoothBeaconRestart();
     });
 
     // Pass the explicit path to the beacon file
-    m_beacon->start(exe, {"--path", path});
-    qDebug() << "Beacon process started watching:" << path;
+    beacon->start(exe, {"--path", path});
+    if (!beacon->waitForStarted(3000)) {
+        qWarning() << "Bluetooth beacon failed to start:" << beacon->errorString();
+        beacon->deleteLater();
+        m_beacon.clear();
+        return false;
+    }
+
+    QByteArray startupOutput;
+    bool ready = false;
+    QElapsedTimer timer;
+    timer.start();
+    while (timer.elapsed() < 8000 && beacon->state() != QProcess::NotRunning) {
+        if (beacon->waitForReadyRead(500)) {
+            startupOutput += beacon->readAll();
+            if (startupOutput.contains("[beacon] READY")) {
+                ready = true;
+                break;
+            }
+            if (startupOutput.contains("[beacon] FATAL")) {
+                break;
+            }
+        }
+    }
+    if (!startupOutput.isEmpty()) {
+        qInfo().noquote() << QString::fromLocal8Bit(startupOutput).trimmed();
+    }
+    if (!ready) {
+        qWarning() << "Bluetooth beacon did not report READY";
+        disconnect(beacon, nullptr, this, nullptr);
+        beacon->kill();
+        beacon->waitForFinished(1000);
+        beacon->deleteLater();
+        m_beacon.clear();
+        return false;
+    }
+
+    connect(beacon, &QProcess::readyRead, this, [beacon]() {
+        qInfo().noquote() << "[beacon]" << QString::fromLocal8Bit(beacon->readAll()).trimmed();
+    });
+
+    qInfo() << "Beacon process READY, watching:" << path;
+    m_beaconRestartDelayMs = 1000;
+    return true;
+}
+
+void MainWindow::scheduleBluetoothBeaconRestart() {
+    const bool wanted = m_forceBleFallback ||
+                        (m_bleCheckbox && m_bleCheckbox->isChecked());
+    if (m_quitting || !wanted || m_blePath.isEmpty() || m_beacon ||
+        m_beaconRestartPending) {
+        return;
+    }
+
+    const int delay = m_beaconRestartDelayMs;
+    m_beaconRestartDelayMs = qMin(m_beaconRestartDelayMs * 2, 30000);
+    m_beaconRestartPending = true;
+    qWarning() << "Retrying Bluetooth beacon in" << delay << "ms";
+    QTimer::singleShot(delay, this, [this]() {
+        m_beaconRestartPending = false;
+        const bool stillWanted = m_forceBleFallback ||
+                                 (m_bleCheckbox && m_bleCheckbox->isChecked());
+        if (m_quitting || !stillWanted || m_beacon) return;
+        m_bleAvailable = startBluetoothBeacon(m_blePath);
+        updateStatus();
+        if (!m_bleAvailable) scheduleBluetoothBeaconRestart();
+    });
 }
 
 void MainWindow::stopBluetoothBeacon() {
     if (!m_beacon) return;
-    
+
+    QProcess *beacon = m_beacon.data();
+    m_beacon.clear();
+    disconnect(beacon, nullptr, this, nullptr);
+
     qDebug() << "Stopping beacon process";
-    if (m_beacon->state() != QProcess::NotRunning) {
-        m_beacon->terminate();
-        if (!m_beacon->waitForFinished(500)) {
+    if (beacon->state() != QProcess::NotRunning) {
+        beacon->terminate();
+        if (!beacon->waitForFinished(500)) {
             qDebug() << "Beacon didn't terminate, killing";
-            m_beacon->kill();
-            m_beacon->waitForFinished(100);
+            beacon->kill();
+            beacon->waitForFinished(100);
         }
     }
-    
-    delete m_beacon;
-    m_beacon = nullptr;
+
+    beacon->deleteLater();
+    m_bleAvailable = false;
     qDebug() << "Beacon stopped and cleaned up";
 }
 
@@ -610,16 +842,35 @@ void MainWindow::closeEvent(QCloseEvent *event) {
 }
 
 void MainWindow::updateStatus() {
-    QString status = m_running ? "UxPlay server running" : "UxPlay server stopped";
+    QString status;
+    if (m_starting) {
+        status = "UxPlay server starting";
+    } else if (m_running) {
+        status = "UxPlay server running";
+    } else {
+        status = "UxPlay server stopped";
+    }
+
+    QString discovery;
+    if (m_bonjourAvailable && m_bleAvailable) {
+        discovery = "Bonjour + Bluetooth";
+    } else if (m_bonjourAvailable) {
+        discovery = "Bonjour";
+    } else if (m_bleAvailable) {
+        discovery = "Bluetooth fallback";
+    } else {
+        discovery = "unavailable (server still running)";
+    }
+
+    status += "\nDiscovery: " + discovery;
     m_statusLabel->setText(status);
+    if (m_retryBonjourAction) {
+        m_retryBonjourAction->setEnabled(!m_bonjourAvailable);
+    }
     m_autostartBtn->setText(isAutostartEnabled() ? "Open uxplay-windows on login: ON " : "Open uxplay-windows on login: OFF");
 }
 
-bool MainWindow::isWindowsServicePresent(const std::wstring& serviceName) const {
-    return queryWindowsServiceState(serviceName) != kServiceMissing;
-}
-
-bool MainWindow::ensureBonjourServiceInstalled() {
+bool MainWindow::ensureBonjourServiceAvailable(bool allowRepair) {
     const std::wstring serviceName = L"Bonjour Service";
 
     DWORD state = queryWindowsServiceState(serviceName);
@@ -628,72 +879,60 @@ bool MainWindow::ensureBonjourServiceInstalled() {
     }
 
     if (state == SERVICE_START_PENDING &&
-        waitForWindowsServiceState(serviceName, SERVICE_RUNNING)) {
+        waitForWindowsServiceState(serviceName, SERVICE_RUNNING, 5000)) {
         return true;
     }
 
     if (state != kServiceMissing) {
+        if (startWindowsServiceNormally(serviceName) &&
+            waitForWindowsServiceState(serviceName, SERVICE_RUNNING, 5000)) {
+            Sleep(1000); // allow the DNS-SD IPC endpoint to become ready
+            return true;
+        }
+
+        if (!allowRepair) {
+            qWarning() << "Bonjour is installed but not running; continuing without blocking startup";
+            return false;
+        }
+
         int choice = QMessageBox::question(
             this,
             "Bonjour Service Not Running",
-            QString("Bonjour Service is installed but %1. macOS discovery "
-                    "will not work until Bonjour/mDNS is running.\n\n"
-                    "Start Bonjour Service now?").arg(bonjourStateText(state)),
+            QString("Bonjour Service is installed but %1. Start it with "
+                    "administrator permission?\n\n"
+                    "Choose No to continue with Bluetooth discovery.")
+                .arg(bonjourStateText(state)),
             QMessageBox::Yes | QMessageBox::No,
             QMessageBox::Yes
         );
 
-        if (choice != QMessageBox::Yes) {
-            QMessageBox::critical(
-                this,
-                "Bonjour Service Not Running",
-                "Bonjour Service is required for AirPlay discovery. "
-                "The application will now exit."
-            );
-            return false;
-        }
-
-        if (startWindowsServiceNormally(serviceName) &&
-            waitForWindowsServiceState(serviceName, SERVICE_RUNNING)) {
-            return true;
-        }
-
-        QMessageBox::information(
-            this,
-            "Admin Permission Required",
-            "Windows needs administrator permission to start Bonjour Service. "
-            "Please approve the UAC prompt."
-        );
-
-        if (startWindowsServiceElevated(serviceName) &&
+        if (choice == QMessageBox::Yes &&
+            startWindowsServiceElevated(serviceName) &&
             waitForWindowsServiceState(serviceName, SERVICE_RUNNING, 10000)) {
+            Sleep(1000);
             return true;
         }
 
-        QMessageBox::critical(
-            this,
-            "Bonjour Start Failed",
-            "Bonjour Service could not be started. macOS will not be able "
-            "to discover uxplay-windows until the service is running."
-        );
+        qWarning() << "Bonjour is installed but could not be started; continuing with BLE";
+        return false;
+    }
+
+    if (!allowRepair) {
+        qWarning() << "Bonjour is not installed; continuing without blocking startup";
         return false;
     }
 
     int choice = QMessageBox::question(
         this,
-        "Bonjour Service Required",
-        "Bonjour Service is required for discovery (mDNS). It is not "
-        "installed.\n\nDo you want to install it now?",
+        "Bonjour Service Unavailable",
+        "Bonjour Service is not installed. Install it now for the most "
+        "reliable macOS discovery?\n\nChoose No to continue with Bluetooth discovery.",
         QMessageBox::Yes | QMessageBox::No,
         QMessageBox::Yes
     );
 
     if (choice != QMessageBox::Yes) {
-        QMessageBox::critical(
-            this,
-            "Bonjour Service Missing",
-            "Bonjour Service is required. The application will now exit."
-        );
+        qWarning() << "Bonjour installation declined; continuing with BLE";
         return false;
     }
 
@@ -710,33 +949,91 @@ bool MainWindow::ensureBonjourServiceInstalled() {
     if (rc == 0 &&
         (queryWindowsServiceState(serviceName) == SERVICE_RUNNING ||
          waitForWindowsServiceState(serviceName, SERVICE_RUNNING, 15000))) {
+        Sleep(1000);
         QMessageBox::information(
             this,
             "Installation Complete",
-            "Bonjour Service installed successfully.\nThe application will restart."
+            "Bonjour Service installed successfully. UxPlay will continue starting."
         );
-        restartApplication();
-        return false; // do not start server in this instance
+        return true;
     }
 
-    QMessageBox::critical(
+    QMessageBox::warning(
         this,
-        "Installation Failed",
-        "Failed to install or start 'Bonjour Service'.\n\n"
-        "The application will now exit."
+        "Bonjour Installation Failed",
+        "Bonjour could not be installed or started. UxPlay will continue "
+        "with Bluetooth discovery. You can retry Bonjour from the tray menu."
     );
     return false;
 }
 
+void MainWindow::showDiscoveryFallbackWarning() {
+    QString detail = m_bleAvailable
+        ? "Bonjour is unavailable. UxPlay is still running and will use Bluetooth discovery."
+        : "Bonjour and Bluetooth discovery are unavailable. UxPlay is still running, but the Mac may not find it automatically.";
+
+    QMessageBox::warning(
+        this,
+        "Discovery Running in Degraded Mode",
+        detail + "\n\nUse 'Retry Bonjour Discovery' from the tray menu after fixing the service."
+    );
+    if (m_tray) {
+        m_tray->showMessage(
+            "Discovery degraded",
+            detail,
+            QSystemTrayIcon::Warning,
+            8000);
+    }
+}
+
+void MainWindow::retryBonjourDiscovery() {
+    if (m_bonjourAvailable) return;
+
+    if (!ensureBonjourServiceAvailable(true)) {
+        showDiscoveryFallbackWarning();
+        return;
+    }
+
+    m_bonjourAvailable = true;
+    m_forceBleFallback = false;
+    updateStatus();
+    QMessageBox::information(
+        this,
+        "Bonjour Ready",
+        "Bonjour is running. The AirPlay engine will restart once to register its services."
+    );
+    stopServer();
+    startServer();
+}
+
+void MainWindow::openLogFile() {
+    const QString path = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
+                         + "/uxplay-windows.log";
+    if (!QFileInfo::exists(path)) {
+        QMessageBox::information(this, "Log File", "No log file has been created yet.");
+        return;
+    }
+    QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+}
+
 void MainWindow::restartApplication() {
     m_quitting = true;
+
+    // The engine is isolated in a child process, so it can be stopped fully
+    // before the replacement GUI starts and re-registers the same DeviceID.
     stopServer();
+    single_instance::release();
 
     QString exePath = QApplication::applicationFilePath();
     QStringList args = QCoreApplication::arguments();
     if (!args.isEmpty()) args.removeFirst(); // remove exe path
 
-    QProcess::startDetached(exePath, args);
+    if (!QProcess::startDetached(exePath, args)) {
+        single_instance::acquire();
+        m_quitting = false;
+        QMessageBox::critical(this, "Restart Failed", "Could not start a new uxplay-windows process.");
+        return;
+    }
 
     // close GUI of current process after a short delay
     QTimer::singleShot(200, qApp, &QCoreApplication::quit);
