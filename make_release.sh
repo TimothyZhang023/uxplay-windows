@@ -156,6 +156,9 @@ mkdir $DIST_DIR/resources
 cp $PROJECT_ROOT/stuff/newicon.ico $DIST_DIR/resources/icon.ico
 cp $PROJECT_ROOT/stuff/uxplay_arguments_list.txt $DIST_DIR/resources/uxplay_arguments_list.txt
 
+bash "$PROJECT_ROOT/stuff/complete_runtime_bundle.sh" "$DIST_DIR"
+bash "$PROJECT_ROOT/stuff/validate_gstreamer_bundle.sh" "$DIST_DIR" "$BUILD_DIR"
+
 echo "================================================="
 echo " ✅ Done! Package is ready in $DIST_DIR"
 echo "================================================="
