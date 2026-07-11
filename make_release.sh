@@ -147,7 +147,8 @@ echo "================================================="
 echo " 5. Finalizing Qt Dependencies (windeployqt)"
 echo "================================================="
 bash "$PROJECT_ROOT/stuff/copy_directx_shader_runtime.sh" "$DIST_DIR"
-windeployqt --no-translations --no-compiler-runtime --dir "$DIST_DIR" "$DIST_DIR/$EXE_NAME"
+windeployqt --no-translations --no-compiler-runtime \
+  --no-system-dxc-compiler --dir "$DIST_DIR" "$DIST_DIR/$EXE_NAME"
 
 cp "./Bonjour SDK/Bin/x64/dnssd.dll" "$DIST_DIR/"
 cp "./Bonjour SDK/Bin/x64/mDNSResponder.exe" "$DIST_DIR/"

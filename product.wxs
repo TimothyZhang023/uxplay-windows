@@ -40,7 +40,7 @@
 
     <ComponentGroup Id="AppFiles" Directory="INSTALLDIR">
       <Files Include="./release/**">
-        <Exclude Files="**/*.pdb;**/uxplay-windows.exe;**/uxplay-engine.exe;**/mDNSResponder.exe" />
+        <Exclude Files="./release/*.pdb;./release/**/*.pdb;./release/uxplay-windows.exe;./release/uxplay-engine.exe;./release/mDNSResponder.exe" />
       </Files>
     </ComponentGroup>
 
