@@ -148,7 +148,12 @@ cp stuff/newicon.ico release/resources/icon.ico
 cp stuff/uxplay_arguments_list.txt release/resources/uxplay_arguments_list.txt
 
 echo "================================================="
-echo " 7. Validating packaged executables and required files"
+echo " 7. Completing recursive runtime dependencies"
+echo "================================================="
+bash "$PROJECT_ROOT/stuff/complete_runtime_bundle.sh" "$DIST_DIR"
+
+echo "================================================="
+echo " 8. Validating packaged executables and required files"
 echo "================================================="
 for required in \
   "$DIST_DIR/$EXE_NAME" \
@@ -166,6 +171,7 @@ done
 
 PATH="$DIST_DIR:$PATH" "$DIST_DIR/$ENGINE_EXE" -v
 "$DIST_DIR/$BEACON_EXE" --help > /dev/null
+bash "$PROJECT_ROOT/stuff/validate_gstreamer_bundle.sh" "$DIST_DIR" "$BUILD_DIR"
 
 echo "================================================="
 echo " ✅ Done! Package is ready in $DIST_DIR"
