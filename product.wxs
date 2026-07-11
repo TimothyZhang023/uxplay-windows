@@ -24,7 +24,7 @@
       <Directory Id="INSTALLDIR" Name="uxplay-windows" />
     </StandardDirectory>
 
-    <Feature Id="MainFeature" Title="uxplay-windows" Level="1" Absent="disallow">
+    <Feature Id="MainFeature" Title="uxplay-windows" Level="1">
       <ComponentGroupRef Id="AppFiles" />
       <ComponentGroupRef Id="AppExe" />
       <ComponentRef Id="EngineComponent" />
