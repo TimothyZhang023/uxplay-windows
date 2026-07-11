@@ -1,10 +1,16 @@
 #include "mainwindow.h"
+#include "single_instance.hpp"
 #include <QApplication>
 #include <QMessageBox>
 #include <QSystemTrayIcon>
 #include <QDir>
 #include <QProcessEnvironment>
 #include <QIcon>
+#include <QFile>
+#include <QFileInfo>
+#include <QStandardPaths>
+
+#include <iostream>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -12,9 +18,11 @@
 #endif
 
 int main(int argc, char *argv[]) {
+    bool attachedConsole = false;
 #ifdef _WIN32
     // if the process was started from a console (CMD/PowerShell), attach to it so we can see qDebug() output.
     if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+        attachedConsole = true;
         // redirect stdout and stderr to the console
         FILE* fp;
         freopen_s(&fp, "CONOUT$", "w", stdout);
@@ -28,6 +36,44 @@ int main(int argc, char *argv[]) {
     app.setOrganizationName("leapbtw");
     app.setApplicationName("uxplay-windows");
     app.setWindowIcon(QIcon(QApplication::applicationDirPath() + "/resources/icon.ico"));
+
+    // Acquire before touching the shared log or launching any helper process.
+    if (!single_instance::acquire()) {
+        QMessageBox::information(
+            nullptr,
+            "uxplay-windows",
+            "uxplay-windows is already running. Use its system tray icon."
+        );
+        return 0;
+    }
+    QObject::connect(&app, &QCoreApplication::aboutToQuit,
+                     &app, &single_instance::release);
+
+#ifdef _WIN32
+    const QString appData = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    QDir().mkpath(appData);
+    const QString logPath = appData + "/uxplay-windows.log";
+    const QString oldLogPath = appData + "/uxplay-windows.log.old";
+    if (!attachedConsole) {
+        QFileInfo info(logPath);
+        if (info.exists() && info.size() > 5 * 1024 * 1024) {
+            QFile::remove(oldLogPath);
+            QFile::rename(logPath, oldLogPath);
+        }
+        FILE *stream = nullptr;
+        _wfreopen_s(&stream,
+                    reinterpret_cast<const wchar_t *>(logPath.utf16()),
+                    L"a", stdout);
+        _wfreopen_s(&stream,
+                    reinterpret_cast<const wchar_t *>(logPath.utf16()),
+                    L"a", stderr);
+        std::ios::sync_with_stdio();
+    }
+    qputenv("QT_FORCE_STDERR_LOGGING", "1");
+    qSetMessagePattern("[%{time yyyy-MM-dd hh:mm:ss.zzz}] [%{type}] %{message}");
+    qInfo() << "uxplay-windows starting";
+    qInfo() << "Log file:" << logPath;
+#endif
     
     QString appPath = QApplication::applicationDirPath();
     
@@ -42,6 +88,7 @@ int main(int argc, char *argv[]) {
 
     if (!QSystemTrayIcon::isSystemTrayAvailable()) {
         QMessageBox::critical(nullptr, "Error", "System tray not available.");
+        single_instance::release();
         return 1;
     }
 

@@ -2,14 +2,14 @@ This is a quick developer guide for people who want to locally build this branch
 
 - clone the github repo
   ```git
-  git clone https://github.com/leapbtw/uxplay-windows.git
+  git clone --recurse-submodules https://github.com/TimothyZhang023/uxplay-windows.git
   ```
   
 - install [MSYS2](https://www.msys2.org/)
   <h6>from now on we'll be working in UCRT64, so my suggestion is to add it to Windows Terminal to make it easier to work with</h6>
 - install the UCRT64 dependencies with pacman
   ```
-  pacman -S --needed - < ucrt_deps.txt
+  pacman -S --needed --noconfirm - < ucrt_x64_dependencies.txt
   ```
 - install the BLE beacon dependencies with pip
   ```python

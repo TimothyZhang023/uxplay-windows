@@ -1,0 +1,32 @@
+diff --git a/mDNSWindows/SystemService/Service.c b/mDNSWindows/SystemService/Service.c
+index 8b21c49..f940f80 100644
+--- a/mDNSWindows/SystemService/Service.c
++++ b/mDNSWindows/SystemService/Service.c
+@@ -377,6 +377,7 @@ static OSStatus	InstallService( LPCTSTR inName, LPCTSTR inDisplayName, LPCTSTR i
+ 	SC_HANDLE		service;
+ 	BOOL			ok;
+ 	TCHAR			fullPath[ MAX_PATH ];
++	TCHAR			servicePath[ MAX_PATH + 3 ];
+ 	TCHAR *			namePtr;
+ 	DWORD			size;
+ 	
+@@ -388,6 +389,10 @@ static OSStatus	InstallService( LPCTSTR inName, LPCTSTR inDisplayName, LPCTSTR i
+ 	size = GetFullPathName( inPath, MAX_PATH, fullPath, &namePtr );
+ 	err = translate_errno( size > 0, (OSStatus) GetLastError(), kPathErr );
+ 	require_noerr( err, exit );
++	// Service ImagePath values containing spaces must be quoted. Without this,
++	// installs under Program Files can fail and create an unquoted-path risk.
++	require_action( _sntprintf_s( servicePath, _countof( servicePath ), _TRUNCATE,
++		TEXT( "\"%s\"" ), fullPath ) > 0, exit, err = kPathErr );
+ 	
+ 	// Create the service and start it.
+ 	
+@@ -396,7 +401,7 @@ static OSStatus	InstallService( LPCTSTR inName, LPCTSTR inDisplayName, LPCTSTR i
+ 	require_noerr( err, exit );
+ 	
+ 	service = CreateService( scm, inName, inDisplayName, SERVICE_ALL_ACCESS, SERVICE_WIN32_SHARE_PROCESS, 
+-							 SERVICE_AUTO_START, SERVICE_ERROR_NORMAL, fullPath, NULL, NULL, kServiceDependencies, 
++							 SERVICE_AUTO_START, SERVICE_ERROR_NORMAL, servicePath, NULL, NULL, kServiceDependencies,
+ 							 NULL, NULL );
+ 	err = translate_errno( service, (OSStatus) GetLastError(), kDuplicateErr );
+ 	require_noerr( err, exit );

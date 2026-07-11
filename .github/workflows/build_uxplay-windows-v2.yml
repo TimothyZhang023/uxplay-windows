@@ -1,6 +1,10 @@
 name: build uxplay-windows
 # Pull requests build artifacts; pushes to main also publish a release.
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
     branches:
@@ -16,7 +20,7 @@ on:
         required: false
         type: boolean
       release_tag:
-        description: 'Optional tag to publish a GitHub Release, for example v2.1.1-mdns. Leave empty to build artifacts only.'
+        description: 'Optional tag to publish a GitHub Release. Leave empty to build artifacts only.'
         default: ''
         required: false
         type: string
@@ -27,8 +31,9 @@ jobs:
     # mDNSResponder's Visual Studio projects are validated with VS 2022.
     # Pin the image so a windows-latest migration cannot break releases.
     runs-on: windows-2022
+    timeout-minutes: 30
     permissions:
-      contents: write
+      contents: read
 
     steps:
       - name: clone the repo
@@ -46,22 +51,22 @@ jobs:
         with:
           path: |
             Bonjour SDK
-          key: mdns-${{ runner.os }}-${{ hashFiles('mdnsresponder-patches/2881.patch') }}-v3
+          key: mdns-${{ runner.os }}-x64-641cdf73-${{ hashFiles('mdnsresponder-patches/2881.patch', 'mdnsresponder-patches/quote-service-path.patch') }}-v4
           restore-keys: |
-            mdns-${{ runner.os }}-
+            mdns-${{ runner.os }}-x64-641cdf73-
 
       - name: mDNSResponder compilation
         if: steps.mdns-cache.outputs.cache-hit != 'true'
         shell: powershell
         run: |
-          git clone --branch rel/mDNSResponder-2881 --depth 1 `
-            --single-branch `
-            https://github.com/apple-oss-distributions/mDNSResponder.git `
-            mdns2881
-
+          git init mdns2881
           cd mdns2881
+          git remote add origin https://github.com/apple-oss-distributions/mDNSResponder.git
+          git fetch --depth 1 origin 641cdf73ef46e1824895cbc44ad8ac7647da2479
+          git checkout --detach FETCH_HEAD
           cp -v ../mdnsresponder-patches/2881.patch .
           git apply -v 2881.patch
+          git apply -v ../mdnsresponder-patches/quote-service-path.patch
 
           & 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Current\Bin\MSBuild.exe' `
             .\mDNSWindows\DLL\dnssd.vcxproj /m /t:Build /p:Configuration=Release /p:Platform=x64
@@ -175,32 +180,48 @@ jobs:
           name: uxplay-windows-msi
           path: uxplaywindows-installer.msi
 
-      - name: uploading portable artifact
-        uses: actions/upload-artifact@v5
-        with:
-          name: uxplay-windows
-          path: release/**
-
       - name: upload portable zip artifact
         uses: actions/upload-artifact@v5
         with:
           name: uxplay-windows-zip
           path: uxplay-windows.zip
 
-      - name: compute release tag
+  release:
+    name: publish release
+    needs: build
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: download msi
+        uses: actions/download-artifact@v5
+        with:
+          name: uxplay-windows-msi
+          path: dist
+
+      - name: download portable zip
+        uses: actions/download-artifact@v5
+        with:
+          name: uxplay-windows-zip
+          path: dist
+
+      - name: compute release metadata
         id: release_tag
-        shell: powershell
+        shell: bash
         run: |
-          if ("${{ github.event_name }}" -eq "workflow_dispatch" -and "${{ inputs.release_tag }}" -ne "") {
-            "tag=${{ inputs.release_tag }}" >> $env:GITHUB_OUTPUT
-          } elseif ("${{ github.event_name }}" -eq "push" -and "${{ github.ref }}" -eq "refs/heads/main") {
-            "tag=v2.1.2-mdns-${{ github.run_number }}" >> $env:GITHUB_OUTPUT
-          } else {
-            "tag=" >> $env:GITHUB_OUTPUT
-          }
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            tag="${{ inputs.release_tag }}"
+          else
+            tag="v2.1.3-discovery-${{ github.run_number }}"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          (cd dist && sha256sum uxplaywindows-installer.msi uxplay-windows.zip > SHA256SUMS.txt)
 
       - name: publish github release
-        if: ${{ steps.release_tag.outputs.tag != '' }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.release_tag.outputs.tag }}
@@ -209,5 +230,6 @@ jobs:
           make_latest: true
           generate_release_notes: true
           files: |
-            uxplaywindows-installer.msi
-            uxplay-windows.zip
+            dist/uxplaywindows-installer.msi
+            dist/uxplay-windows.zip
+            dist/SHA256SUMS.txt
