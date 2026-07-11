@@ -1,22 +1,19 @@
 #pragma once
 
-#include <string>
-
+#include <QByteArray>
+#include <QCheckBox>
+#include <QComboBox>
+#include <QFile>
 #include <QLabel>
 #include <QMainWindow>
-#include <QComboBox>
-#include <QPushButton>
-#include <QSystemTrayIcon>
-#include <QProcess>
-#include <QCheckBox>
-#include <QByteArray>
-#include <QFile>
-#include <QMessageBox>
 #include <QPointer>
+#include <QProcess>
+#include <QPushButton>
+#include <QStringList>
+#include <QSystemTrayIcon>
 
 class QMenu;
 class QAction;
-class QTimer;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -43,7 +40,6 @@ private slots:
     void toggleLowLatency(bool checked);
     void onRendererChanged(int index);
     void onQualityChanged(int index);
-
 
 private:
     void startServer();

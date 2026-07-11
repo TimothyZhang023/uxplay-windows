@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 
 find_package(Qt6 COMPONENTS Core Widgets REQUIRED)
+find_package(Threads REQUIRED)
 
 # Keep the Windows-specific renderer changes reviewable in this repository
 # while libuxplay remains pinned to its upstream commit. Apply the patch once
@@ -59,7 +60,7 @@ add_subdirectory(libuxplay)
 add_executable(uxplay-engine
     src/engine_main.cpp
 )
-target_link_libraries(uxplay-engine PRIVATE uxplay)
+target_link_libraries(uxplay-engine PRIVATE uxplay Threads::Threads)
 if(WIN32)
     target_link_libraries(uxplay-engine PRIVATE winmm)
 endif()
