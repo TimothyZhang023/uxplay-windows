@@ -1,6 +1,7 @@
 $ErrorActionPreference = 'Stop'
 
-$path = 'mDNSWindows\SystemService\mDNSResponder.vcxproj'
+$path = Join-Path -Path (Get-Location).Path `
+    -ChildPath 'mDNSWindows\SystemService\mDNSResponder.vcxproj'
 $source = Get-Content -Raw -Path $path
 
 $legacyDefine = '_LEGACY_NAT_TRAVERSAL_;'
