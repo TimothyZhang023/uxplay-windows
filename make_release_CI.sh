@@ -129,7 +129,9 @@ cp "$GST_SCANNER" "$DIST_DIR/libexec/gstreamer-1.0/"
 echo "================================================="
 echo " 5. Finalizing Qt Dependencies (windeployqt)"
 echo "================================================="
-windeployqt --no-translations --no-compiler-runtime \
+
+bash "$PROJECT_ROOT/stuff/copy_directx_shader_runtime.sh" "$DIST_DIR"
+windeployqt --no-translations --no-compiler-runtime --no-system-dxc-compiler \
   --dir "$DIST_DIR" "$DIST_DIR/$EXE_NAME"
 
 
@@ -148,13 +150,20 @@ cp stuff/newicon.ico release/resources/icon.ico
 cp stuff/uxplay_arguments_list.txt release/resources/uxplay_arguments_list.txt
 
 echo "================================================="
-echo " 7. Validating packaged executables and required files"
+echo " 7. Completing recursive runtime dependencies"
+echo "================================================="
+bash "$PROJECT_ROOT/stuff/complete_runtime_bundle.sh" "$DIST_DIR"
+
+echo "================================================="
+echo " 8. Validating packaged executables and required files"
 echo "================================================="
 for required in \
   "$DIST_DIR/$EXE_NAME" \
   "$DIST_DIR/$ENGINE_EXE" \
   "$DIST_DIR/$BEACON_EXE" \
   "$DIST_DIR/dnssd.dll" \
+  "$DIST_DIR/dxcompiler.dll" \
+  "$DIST_DIR/dxil.dll" \
   "$DIST_DIR/mDNSResponder.exe" \
   "$DIST_DIR/libexec/gstreamer-1.0/gst-plugin-scanner.exe" \
   "$DIST_DIR/resources/uxplay_arguments_list.txt"; do
@@ -166,6 +175,7 @@ done
 
 PATH="$DIST_DIR:$PATH" "$DIST_DIR/$ENGINE_EXE" -v
 "$DIST_DIR/$BEACON_EXE" --help > /dev/null
+bash "$PROJECT_ROOT/stuff/validate_gstreamer_bundle.sh" "$DIST_DIR" "$BUILD_DIR"
 
 echo "================================================="
 echo " ✅ Done! Package is ready in $DIST_DIR"
