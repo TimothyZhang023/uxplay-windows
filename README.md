@@ -26,9 +26,15 @@ You can also set it to run automatically when your PC starts
 > *My \<apple device\> can't connect to my PC!!!*
 > 1. Check the discovery status shown in the app. If it is degraded, choose `Retry Bonjour Discovery` from the tray menu.
 > 2. Toggle Wi-Fi and Bluetooth OFF on your iPhone/iPad/Mac, wait a couple of seconds and reconnect. It might take a few attempts.
-> 3. Use `Open Log File` from the tray menu and attach the log when reporting a problem.
+> 3. Use `Open Diagnostic Logs` from the app or tray menu. Attach both
+>    `uxplay-windows.log` and `uxplay-engine.log` when reporting a problem.
 >
 > Bonjour failure no longer stops the receiver. It continues with Bluetooth fallback and shows a warning. The BLE helper cycles through active IPv4 interfaces, which improves discovery on VPN, Wi-Fi + Ethernet and direct-cable networks.
+>
+> If the UxPlay engine cannot initialize, the app records its complete output,
+> Windows crash code and restart history. Automatic retries pause after three
+> consecutive startup failures instead of continuously switching between
+> `starting` and `stopped`; use `Retry UxPlay Engine` after checking the logs.
 
 > [!IMPORTANT]
 > *Why is Windows Defender complaining during installation?*

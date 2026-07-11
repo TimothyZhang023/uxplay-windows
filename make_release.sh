@@ -60,6 +60,7 @@ echo " 3. Preparing Clean Dist Folder"
 echo "================================================="
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR/lib/gstreamer-1.0"
+mkdir -p "$DIST_DIR/libexec/gstreamer-1.0"
 [ -f "docs/LICENSE.rtf" ] && cp "docs/LICENSE.rtf" "$DIST_DIR/"
 [ -f "docs/THIRD_PARTY_NOTICES.md" ] && cp "docs/THIRD_PARTY_NOTICES.md" "$DIST_DIR/"
 [ -f "libuxplay/LICENSE" ] && cp "libuxplay/LICENSE" "$DIST_DIR/GPL-3.0.txt"
@@ -129,6 +130,13 @@ while read -r win_path; do
   cp "$unix_path" "$dest"
   echo "COPIED: $unix_path -> $dest"
 done <<< "$DLL_LIST"
+
+GST_SCANNER="${MSYSTEM_PREFIX:-/ucrt64}/libexec/gstreamer-1.0/gst-plugin-scanner.exe"
+if [ ! -s "$GST_SCANNER" ]; then
+  echo "ERROR: GStreamer plugin scanner not found: $GST_SCANNER" >&2
+  exit 1
+fi
+cp "$GST_SCANNER" "$DIST_DIR/libexec/gstreamer-1.0/"
 
 
 echo "Closing app..."
