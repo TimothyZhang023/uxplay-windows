@@ -13,6 +13,7 @@
 #include <QFile>
 #include <QMessageBox>
 #include <QPointer>
+#include <QRect>
 
 class QMenu;
 class QAction;
@@ -27,6 +28,8 @@ public:
 
 protected:
     void closeEvent(QCloseEvent *event) override;
+    bool nativeEvent(const QByteArray &eventType, void *message,
+                     qintptr *result) override;
 
 private slots:
     void onTrayActivated(QSystemTrayIcon::ActivationReason reason);
@@ -40,7 +43,10 @@ private slots:
     void retryEngine();
     void toggleBle(bool checked); // bluetooth
     void toggleForceFullscreen(bool checked);
+    void toggleLowLatency(bool checked);
+    void toggleVideoFullscreen();
     void onRendererChanged(int index);
+    void onQualityChanged(int index);
 
 
 private:
@@ -52,6 +58,11 @@ private:
     bool startBluetoothBeacon(const QString &path);
     void stopBluetoothBeacon();
     void applyRendererAndFullscreenArgs(QStringList &args);
+    void applyQualityAndLatencyArgs(QStringList &args);
+    void restartEngineForSettings(const QString &message);
+    quintptr findVideoWindow() const;
+    void setVideoFullscreen(bool fullscreen);
+    void monitorVideoWindow();
     void showDiscoveryFallbackWarning();
     void handleEngineOutput(QProcess *engine);
     void markEngineReady();
@@ -74,13 +85,16 @@ private:
 
     QCheckBox *m_bleCheckbox = nullptr;
     QCheckBox *m_fullscreenCheckbox = nullptr;
+    QCheckBox *m_lowLatencyCheckbox = nullptr;
     QComboBox *m_rendererCombo = nullptr;
+    QComboBox *m_qualityCombo = nullptr;
     QSystemTrayIcon *m_tray = nullptr;
     QMenu *m_trayMenu = nullptr;
     QAction *m_autostartAction = nullptr;
     QAction *m_statusAction = nullptr;
     QAction *m_retryBonjourAction = nullptr;
     QAction *m_retryEngineAction = nullptr;
+    QAction *m_toggleFullscreenAction = nullptr;
 
     QPushButton *m_autostartBtn = nullptr;
     QPushButton *m_settingsBtn = nullptr;
@@ -95,6 +109,9 @@ private:
     QFile m_engineLogFile;
     quint64 m_enginePid = 0;
     qint64 m_engineStartedAtMs = 0;
+    quintptr m_videoWindow = 0;
+    qintptr m_windowedStyle = 0;
+    QRect m_windowedRect;
 
     bool m_running = false;
     bool m_starting = false;
@@ -104,6 +121,8 @@ private:
     bool m_bleAvailable = false;
     bool m_engineWasReady = false;
     bool m_engineRestartPending = false;
+    bool m_videoFullscreen = false;
+    bool m_altEnterHotkeyRegistered = false;
     bool m_registryRepairAttempted = false;
     int m_consecutiveEngineFailures = 0;
     QString m_lastEngineFailure;
