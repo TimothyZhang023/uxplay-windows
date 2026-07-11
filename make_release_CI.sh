@@ -58,6 +58,7 @@ echo " 3. Preparing Clean Dist Folder"
 echo "================================================="
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR/lib/gstreamer-1.0"
+mkdir -p "$DIST_DIR/libexec/gstreamer-1.0"
 [ -f "docs/LICENSE.rtf" ] && cp "docs/LICENSE.rtf" "$DIST_DIR/"
 [ -f "docs/THIRD_PARTY_NOTICES.md" ] && cp "docs/THIRD_PARTY_NOTICES.md" "$DIST_DIR/"
 [ -f "libuxplay/LICENSE" ] && cp "libuxplay/LICENSE" "$DIST_DIR/GPL-3.0.txt"
@@ -115,6 +116,16 @@ done < "$DLL_LIST_FILE"
 
 echo "Big runtime bundle copied (restricted to dll.txt)."
 
+# GStreamer starts this helper to inspect dynamically loaded plugins. It is an
+# executable (not a DLL), so it was previously omitted by dll.txt and plugin
+# discovery could fail only after installation on a clean Windows machine.
+GST_SCANNER="${MSYSTEM_PREFIX:-/ucrt64}/libexec/gstreamer-1.0/gst-plugin-scanner.exe"
+if [ ! -s "$GST_SCANNER" ]; then
+  echo "ERROR: GStreamer plugin scanner not found: $GST_SCANNER" >&2
+  exit 1
+fi
+cp "$GST_SCANNER" "$DIST_DIR/libexec/gstreamer-1.0/"
+
 echo "================================================="
 echo " 5. Finalizing Qt Dependencies (windeployqt)"
 echo "================================================="
@@ -145,6 +156,7 @@ for required in \
   "$DIST_DIR/$BEACON_EXE" \
   "$DIST_DIR/dnssd.dll" \
   "$DIST_DIR/mDNSResponder.exe" \
+  "$DIST_DIR/libexec/gstreamer-1.0/gst-plugin-scanner.exe" \
   "$DIST_DIR/resources/uxplay_arguments_list.txt"; do
   if [ ! -s "$required" ]; then
     echo "ERROR: required release file missing or empty: $required" >&2

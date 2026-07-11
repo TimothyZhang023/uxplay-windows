@@ -10,6 +10,7 @@
 #include <QApplication>
 #include <QCloseEvent>
 #include <QDesktopServices>
+#include <QDateTime>
 #include <QDebug>
 #include <QDir>
 #include <QElapsedTimer>
@@ -40,6 +41,26 @@ namespace {
 constexpr DWORD kServiceMissing = 0;
 constexpr DWORD kBonjourStartTimeoutMs = 15000;
 constexpr DWORD kBonjourPollMs = 250;
+constexpr int kMaximumStartupFailures = 3;
+constexpr qint64 kMinimumHealthyLifetimeMs = 5000;
+
+QString diagnosticDirectory() {
+    return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+}
+
+QStringList redactedArguments(const QStringList &arguments) {
+    QStringList result = arguments;
+    for (int i = 0; i < result.size(); ++i) {
+        if ((result[i] == "-pw" || result[i] == "-pin") &&
+            i + 1 < result.size() &&
+            !result[i + 1].startsWith('-')) {
+            result[i + 1] = "********";
+        } else if (result[i].startsWith("-pin") && result[i].size() > 4) {
+            result[i] = "-pin****";
+        }
+    }
+    return result;
+}
 
 DWORD queryWindowsServiceState(const std::wstring &serviceName) {
     SC_HANDLE hSCM = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
@@ -259,7 +280,7 @@ QStringList MainWindow::getArgumentsFromFile() {
 void MainWindow::setupUI() {
     setWindowTitle("uxplay-windows");
     setWindowIcon(QApplication::windowIcon());
-    setFixedSize(300, 260);
+    setFixedSize(340, 310);
 
     auto *central = new QWidget(this);
     setCentralWidget(central);
@@ -267,6 +288,7 @@ void MainWindow::setupUI() {
 
     m_statusLabel = new QLabel("Initializing...", this);
     m_statusLabel->setAlignment(Qt::AlignCenter);
+    m_statusLabel->setWordWrap(true);
     layout->addWidget(m_statusLabel);
 
     m_windowMonitorTimer = new QTimer(this);
@@ -321,6 +343,10 @@ void MainWindow::setupUI() {
     connect(m_listargsBtn, &QPushButton::clicked, this, &MainWindow::openListArgsFile);
     layout->addWidget(m_listargsBtn);
 
+    m_logsBtn = new QPushButton("Open Diagnostic Logs", this);
+    connect(m_logsBtn, &QPushButton::clicked, this, &MainWindow::openLogFile);
+    layout->addWidget(m_logsBtn);
+
     m_autostartBtn = new QPushButton(this);
     connect(m_autostartBtn, &QPushButton::clicked, this, &MainWindow::toggleAutostart);
     layout->addWidget(m_autostartBtn);
@@ -362,7 +388,9 @@ void MainWindow::setupTray() {
     m_trayMenu = new QMenu(this);
     m_retryBonjourAction = m_trayMenu->addAction(
         "Retry Bonjour Discovery", this, &MainWindow::retryBonjourDiscovery);
-    m_trayMenu->addAction("Open Log File", this, &MainWindow::openLogFile);
+    m_retryEngineAction = m_trayMenu->addAction(
+        "Retry UxPlay Engine", this, &MainWindow::retryEngine);
+    m_trayMenu->addAction("Open Diagnostic Logs", this, &MainWindow::openLogFile);
     m_trayMenu->addSeparator();
     m_trayMenu->addAction("Quit", this, &MainWindow::quit);
     m_trayMenu->addAction("Restart", this, &MainWindow::restartApplication);
@@ -504,6 +532,7 @@ void MainWindow::startServer() {
     if (!QFileInfo::exists(enginePath)) {
         m_starting = false;
         m_running = false;
+        m_lastEngineFailure = "uxplay-engine.exe is missing";
         updateStatus();
         QMessageBox::critical(
             this,
@@ -516,6 +545,28 @@ void MainWindow::startServer() {
     auto *engine = new QProcess(this);
     m_engine = engine;
     m_engineOutputBuffer.clear();
+    m_engineWasReady = false;
+    m_engineStartedAtMs = QDateTime::currentMSecsSinceEpoch();
+
+    const QString engineLogPath = diagnosticDirectory() + "/uxplay-engine.log";
+    if (m_engineLogFile.isOpen()) m_engineLogFile.close();
+    QFileInfo engineLogInfo(engineLogPath);
+    if (engineLogInfo.exists() && engineLogInfo.size() > 10 * 1024 * 1024) {
+        QFile::remove(engineLogPath + ".old");
+        QFile::rename(engineLogPath, engineLogPath + ".old");
+    }
+    m_engineLogFile.setFileName(engineLogPath);
+    if (!m_engineLogFile.open(QIODevice::WriteOnly | QIODevice::Append)) {
+        qWarning() << "Could not open engine diagnostic log:"
+                   << engineLogPath << m_engineLogFile.errorString();
+    } else {
+        appendEngineLog(QString(
+            "\n========== engine launch %1 ==========\nExecutable: %2\nArguments: %3\n")
+            .arg(QDateTime::currentDateTime().toString(Qt::ISODateWithMs),
+                 QDir::toNativeSeparators(enginePath),
+                 redactedArguments(args).join(' '))
+            .toUtf8());
+    }
     engine->setProgram(enginePath);
     engine->setArguments(args);
     engine->setWorkingDirectory(QApplication::applicationDirPath());
@@ -534,6 +585,8 @@ void MainWindow::startServer() {
         m_running = false;
         updateStatus();
         qInfo() << "UxPlay engine process started, pid=" << m_enginePid;
+        appendEngineLog(QString("[supervisor] process started; pid=%1\n")
+                            .arg(m_enginePid).toUtf8());
     });
     connect(engine, &QProcess::readyRead, this,
             [this, engine]() { handleEngineOutput(engine); });
@@ -541,6 +594,8 @@ void MainWindow::startServer() {
             [this, engine](QProcess::ProcessError error) {
         if (m_engine != engine) return;
         qWarning() << "UxPlay engine process error:" << error << engine->errorString();
+        appendEngineLog(QString("[supervisor] process error: %1\n")
+                            .arg(engine->errorString()).toUtf8());
         if (m_tray) {
             m_tray->showMessage(
                 "UxPlay engine error",
@@ -551,35 +606,93 @@ void MainWindow::startServer() {
         // Qt does not emit finished() when CreateProcess itself fails.
         if (error == QProcess::FailedToStart && m_engine == engine) {
             m_engine.clear();
-            m_engineOutputBuffer.clear();
             m_enginePid = 0;
             m_starting = false;
             m_running = false;
+            ++m_consecutiveEngineFailures;
+            m_lastEngineFailure = "Could not start uxplay-engine.exe: " +
+                                  engine->errorString();
+            appendEngineLog(("[supervisor] " + m_lastEngineFailure + "\n").toUtf8());
+            m_engineOutputBuffer.clear();
+            m_engineLogFile.close();
             updateStatus();
             engine->deleteLater();
-            scheduleEngineRestart();
+            if (m_consecutiveEngineFailures < kMaximumStartupFailures) {
+                scheduleEngineRestart();
+            }
         }
     });
     connect(engine,
             QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this,
             [this, engine](int exitCode, QProcess::ExitStatus exitStatus) {
-        qWarning() << "UxPlay engine exited:" << exitCode << exitStatus;
         const bool wasCurrentEngine = (m_engine == engine);
         if (!wasCurrentEngine) {
             engine->deleteLater();
             return;
         }
 
+        // A final readyRead signal is not guaranteed before finished(). Drain
+        // the pipe first so startup errors are never discarded.
+        handleEngineOutput(engine);
+        const qint64 lifetimeMs = qMax<qint64>(
+            0, QDateTime::currentMSecsSinceEpoch() - m_engineStartedAtMs);
+        const bool startupFailure = !m_engineWasReady ||
+                                    lifetimeMs < kMinimumHealthyLifetimeMs;
+        m_lastEngineFailure = engineExitReason(exitCode, exitStatus, lifetimeMs);
+        qWarning() << "UxPlay engine exited:" << m_lastEngineFailure;
+        appendEngineLog(QString(
+            "[supervisor] engine exited after %1 ms; exitCode=%2; status=%3\n"
+            "[supervisor] reason: %4\n")
+            .arg(lifetimeMs)
+            .arg(exitCode)
+            .arg(exitStatus == QProcess::CrashExit ? "crash" : "normal")
+            .arg(m_lastEngineFailure)
+            .toUtf8());
+
+        if (startupFailure) {
+            ++m_consecutiveEngineFailures;
+        } else {
+            m_consecutiveEngineFailures = 1;
+        }
+
+        const bool pluginRegistryFailure =
+            m_engineOutputBuffer.contains("registry may have been corrupted") ||
+            m_engineOutputBuffer.contains("Required gstreamer plugin");
+        if (pluginRegistryFailure && !m_registryRepairAttempted) {
+            m_registryRepairAttempted = true;
+            const QString registryPath = diagnosticDirectory() +
+                                         "/gstreamer-registry.bin";
+            const bool removed = !QFileInfo::exists(registryPath) ||
+                                 QFile::remove(registryPath);
+            appendEngineLog(QString(
+                "[supervisor] GStreamer registry repair attempted: %1 (%2)\n")
+                .arg(QDir::toNativeSeparators(registryPath),
+                     removed ? "removed" : "remove failed")
+                .toUtf8());
+        }
+
         m_engine.clear();
-        m_engineOutputBuffer.clear();
         m_enginePid = 0;
         m_starting = false;
         m_running = false;
-        updateStatus();
         if (m_windowMonitorTimer) m_windowMonitorTimer->stop();
         engine->deleteLater();
-        scheduleEngineRestart();
+        m_engineLogFile.close();
+        m_engineOutputBuffer.clear();
+        updateStatus();
+
+        if (!startupFailure ||
+            m_consecutiveEngineFailures < kMaximumStartupFailures) {
+            scheduleEngineRestart();
+        } else if (m_tray) {
+            m_tray->showMessage(
+                "UxPlay engine stopped",
+                m_lastEngineFailure +
+                    "\nAutomatic retries were paused. Open Diagnostic Logs, then choose Retry UxPlay Engine.",
+                QSystemTrayIcon::Critical,
+                10000);
+        }
     });
 
     m_starting = true;
@@ -603,8 +716,11 @@ void MainWindow::stopServer() {
                 engine->waitForFinished(1000);
             }
         }
+        handleEngineOutput(engine);
+        appendEngineLog("[supervisor] engine stopped by uxplay-windows\n");
         engine->deleteLater();
     }
+    if (m_engineLogFile.isOpen()) m_engineLogFile.close();
     m_enginePid = 0;
     m_engineOutputBuffer.clear();
     m_starting = false;
@@ -617,9 +733,10 @@ void MainWindow::handleEngineOutput(QProcess *engine) {
     const QByteArray output = engine->readAll();
     if (output.isEmpty()) return;
 
-    qInfo().noquote() << "[engine]" << QString::fromLocal8Bit(output).trimmed();
+    appendEngineLog(output);
     m_engineOutputBuffer += output;
-    if (!m_running && m_engineOutputBuffer.contains("Initialized server socket(s)")) {
+    if (m_engine == engine && !m_running &&
+        m_engineOutputBuffer.contains("Initialized server socket(s)")) {
         markEngineReady();
     }
     if (m_engineOutputBuffer.size() > 16384) {
@@ -627,23 +744,96 @@ void MainWindow::handleEngineOutput(QProcess *engine) {
     }
 }
 
+void MainWindow::appendEngineLog(const QByteArray &data) {
+    if (!m_engineLogFile.isOpen() || data.isEmpty()) return;
+    m_engineLogFile.write(data);
+    if (!data.endsWith('\n')) m_engineLogFile.write("\n");
+    m_engineLogFile.flush();
+}
+
+QString MainWindow::engineExitReason(int exitCode,
+                                     QProcess::ExitStatus exitStatus,
+                                     qint64 lifetimeMs) const {
+    const quint32 windowsCode = static_cast<quint32>(exitCode);
+    QString crash;
+    switch (windowsCode) {
+    case 0xC0000135u: crash = "a required DLL is missing (0xC0000135)"; break;
+    case 0xC000007Bu: crash = "an invalid 32/64-bit DLL was loaded (0xC000007B)"; break;
+    case 0xC0000142u: crash = "a DLL failed to initialize (0xC0000142)"; break;
+    case 0xC0000005u: crash = "access violation (0xC0000005)"; break;
+    case 0xC0000409u: crash = "stack or security check failure (0xC0000409)"; break;
+    default: break;
+    }
+    if (!crash.isEmpty()) return "Engine crashed: " + crash;
+
+    const QString output = QString::fromLocal8Bit(m_engineOutputBuffer);
+    const QStringList priorityMarkers = {
+        "unknown option", "Required gstreamer plugin", "not found",
+        "Error initializing", "Could not initialize", "failed", "stopping"
+    };
+    const QStringList lines = output.split(QRegularExpression("[\\r\\n]+"),
+                                           Qt::SkipEmptyParts);
+    for (const QString &marker : priorityMarkers) {
+        for (auto it = lines.crbegin(); it != lines.crend(); ++it) {
+            if (it->contains(marker, Qt::CaseInsensitive)) {
+                return it->trimmed().left(300);
+            }
+        }
+    }
+    for (auto it = lines.crbegin(); it != lines.crend(); ++it) {
+        const QString line = it->trimmed();
+        if (!line.isEmpty() && !line.startsWith("[engine-wrapper] process is exiting")) {
+            return line.left(300);
+        }
+    }
+
+    if (exitStatus == QProcess::CrashExit) {
+        return QString("Engine crashed with Windows exit code 0x%1")
+            .arg(windowsCode, 8, 16, QLatin1Char('0'));
+    }
+    if (exitCode != 0) {
+        return QString("Engine exited with code %1 after %2 ms and produced no diagnostics")
+            .arg(exitCode).arg(lifetimeMs);
+    }
+    return QString("Engine stopped during startup after %1 ms without an error message")
+        .arg(lifetimeMs);
+}
+
 void MainWindow::markEngineReady() {
     m_starting = false;
     m_running = true;
+    m_engineWasReady = true;
+    m_lastEngineFailure.clear();
     m_restartDelayMs = 1000;
     updateStatus();
     if (m_windowMonitorTimer) m_windowMonitorTimer->start(2000);
     qInfo() << "UxPlay engine is listening";
+    QPointer<QProcess> readyEngine = m_engine;
+    QTimer::singleShot(kMinimumHealthyLifetimeMs, this, [this, readyEngine]() {
+        if (readyEngine && m_engine == readyEngine && m_running) {
+            m_consecutiveEngineFailures = 0;
+        }
+    });
 }
 
 void MainWindow::scheduleEngineRestart() {
-    if (m_quitting) return;
+    if (m_quitting || m_engineRestartPending) return;
     const int delay = m_restartDelayMs;
     m_restartDelayMs = qMin(m_restartDelayMs * 2, 30000);
+    m_engineRestartPending = true;
     qWarning() << "Restarting UxPlay engine in" << delay << "ms";
     QTimer::singleShot(delay, this, [this]() {
-        if (!m_quitting) startServer();
+        m_engineRestartPending = false;
+        if (!m_quitting && !m_engine) startServer();
     });
+}
+
+void MainWindow::retryEngine() {
+    if (m_engine && m_engine->state() != QProcess::NotRunning) return;
+    m_consecutiveEngineFailures = 0;
+    m_restartDelayMs = 1000;
+    m_lastEngineFailure.clear();
+    startServer();
 }
 
 void MainWindow::toggleAutostart() {
@@ -847,6 +1037,8 @@ void MainWindow::updateStatus() {
         status = "UxPlay server starting";
     } else if (m_running) {
         status = "UxPlay server running";
+    } else if (!m_lastEngineFailure.isEmpty()) {
+        status = "UxPlay server failed";
     } else {
         status = "UxPlay server stopped";
     }
@@ -863,9 +1055,18 @@ void MainWindow::updateStatus() {
     }
 
     status += "\nDiscovery: " + discovery;
+    if (!m_lastEngineFailure.isEmpty() && !m_starting && !m_running) {
+        status += "\nReason: " + m_lastEngineFailure.left(120);
+    }
     m_statusLabel->setText(status);
+    m_statusLabel->setToolTip(
+        "Diagnostic logs: " + QDir::toNativeSeparators(diagnosticDirectory()));
     if (m_retryBonjourAction) {
         m_retryBonjourAction->setEnabled(!m_bonjourAvailable);
+    }
+    if (m_retryEngineAction) {
+        m_retryEngineAction->setEnabled(!m_engine ||
+                                        m_engine->state() == QProcess::NotRunning);
     }
     m_autostartBtn->setText(isAutostartEnabled() ? "Open uxplay-windows on login: ON " : "Open uxplay-windows on login: OFF");
 }
@@ -1007,13 +1208,16 @@ void MainWindow::retryBonjourDiscovery() {
 }
 
 void MainWindow::openLogFile() {
-    const QString path = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
-                         + "/uxplay-windows.log";
-    if (!QFileInfo::exists(path)) {
-        QMessageBox::information(this, "Log File", "No log file has been created yet.");
+    const QString path = diagnosticDirectory();
+    if (!QDir().mkpath(path)) {
+        QMessageBox::warning(this, "Diagnostic Logs",
+                             "Could not create the diagnostic log folder:\n" + path);
         return;
     }
-    QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+    if (!QDesktopServices::openUrl(QUrl::fromLocalFile(path))) {
+        QMessageBox::warning(this, "Diagnostic Logs",
+                             "Could not open the diagnostic log folder:\n" + path);
+    }
 }
 
 void MainWindow::restartApplication() {
