@@ -10,18 +10,21 @@ index 8b21c49..f940f80 100644
  	TCHAR *			namePtr;
  	DWORD			size;
  	
-@@ -388,6 +389,10 @@ static OSStatus	InstallService( LPCTSTR inName, LPCTSTR inDisplayName, LPCTSTR i
+@@ -388,6 +389,13 @@ static OSStatus	InstallService( LPCTSTR inName, LPCTSTR inDisplayName, LPCTSTR i
  	size = GetFullPathName( inPath, MAX_PATH, fullPath, &namePtr );
  	err = translate_errno( size > 0, (OSStatus) GetLastError(), kPathErr );
  	require_noerr( err, exit );
 +	// Service ImagePath values containing spaces must be quoted. Without this,
 +	// installs under Program Files can fail and create an unquoted-path risk.
-+	require_action( _sntprintf_s( servicePath, _countof( servicePath ), _TRUNCATE,
-+		TEXT( "\"%s\"" ), fullPath ) > 0, exit, err = kPathErr );
++	require_action( size < MAX_PATH, exit, err = kPathErr );
++	servicePath[ 0 ] = TEXT( '"' );
++	memcpy( &servicePath[ 1 ], fullPath, size * sizeof( TCHAR ) );
++	servicePath[ size + 1 ] = TEXT( '"' );
++	servicePath[ size + 2 ] = TEXT( '\0' );
  	
  	// Create the service and start it.
  	
-@@ -396,7 +401,7 @@ static OSStatus	InstallService( LPCTSTR inName, LPCTSTR inDisplayName, LPCTSTR i
+@@ -396,7 +404,7 @@ static OSStatus	InstallService( LPCTSTR inName, LPCTSTR inDisplayName, LPCTSTR i
  	require_noerr( err, exit );
  	
  	service = CreateService( scm, inName, inDisplayName, SERVICE_ALL_ACCESS, SERVICE_WIN32_SHARE_PROCESS, 

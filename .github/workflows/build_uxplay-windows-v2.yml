@@ -51,7 +51,7 @@ jobs:
         with:
           path: |
             Bonjour SDK
-          key: mdns-${{ runner.os }}-x64-641cdf73-${{ hashFiles('mdnsresponder-patches/2881.patch', 'mdnsresponder-patches/quote-service-path.patch') }}-v4
+          key: mdns-${{ runner.os }}-x64-641cdf73-${{ hashFiles('mdnsresponder-patches/2881.patch', 'mdnsresponder-patches/quote-service-path.patch', 'mdnsresponder-patches/remove-legacy-nat.ps1') }}-v5
           restore-keys: |
             mdns-${{ runner.os }}-x64-641cdf73-
 
@@ -66,6 +66,7 @@ jobs:
           git checkout --detach FETCH_HEAD
           cp -v ../mdnsresponder-patches/2881.patch .
           git apply -v 2881.patch
+          & ../mdnsresponder-patches/remove-legacy-nat.ps1
           git apply -v ../mdnsresponder-patches/quote-service-path.patch
 
           & 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Current\Bin\MSBuild.exe' `
