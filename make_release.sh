@@ -2,10 +2,12 @@
 set -e # Exit immediately if a command fails
 
 EXE_NAME="uxplay-windows.exe"
+ENGINE_EXE="uxplay-engine.exe"
 BEACON_EXE="uxplay-bluetooth-beacon.exe"
 DIST_DIR="$(pwd)/release"
 BUILD_DIR="$(pwd)/build"
 BEACON_DIR="$(pwd)/libuxplay/Bluetooth_LE_beacon"
+BEACON_SOURCE="$(pwd)/src/uxplay-beacon-windows.py"
 
 PROJECT_ROOT="$(pwd)"
 BONJOUR_SDK_HOME="$PROJECT_ROOT/Bonjour SDK"
@@ -48,7 +50,7 @@ pyinstaller \
   --hidden-import=winrt.windows.storage.streams \
   --hidden-import=psutil \
   --console \
-  uxplay-beacon-windows.py \
+  "$BEACON_SOURCE" \
   --noconfirm
 
 cd ../..
@@ -58,10 +60,13 @@ echo " 3. Preparing Clean Dist Folder"
 echo "================================================="
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR/lib/gstreamer-1.0"
-[ -f "LICENSE.md" ] && cp "LICENSE.md" "$DIST_DIR/"
+[ -f "docs/LICENSE.rtf" ] && cp "docs/LICENSE.rtf" "$DIST_DIR/"
+[ -f "docs/THIRD_PARTY_NOTICES.md" ] && cp "docs/THIRD_PARTY_NOTICES.md" "$DIST_DIR/"
+[ -f "libuxplay/LICENSE" ] && cp "libuxplay/LICENSE" "$DIST_DIR/GPL-3.0.txt"
 
 # Copy executables
 cp "$BUILD_DIR/$EXE_NAME" "$DIST_DIR/"
+cp "$BUILD_DIR/$ENGINE_EXE" "$DIST_DIR/"
 cp "$BEACON_DIR/dist/$BEACON_EXE" "$DIST_DIR/"
 
 echo "================================================="
@@ -88,7 +93,7 @@ fi
 
 echo "Capturing Loaded Modules..."
 DLL_LIST=$(powershell.exe -NoProfile -Command "
-    Get-Process -Name '${EXE_NAME%.*}' |
+    Get-Process -Name '${ENGINE_EXE%.*}' |
     Select-Object -ExpandProperty Modules |
     Where-Object { \$_.FileName -like '*ucrt64*' } |
     Select-Object -ExpandProperty FileName
@@ -135,9 +140,13 @@ echo " 5. Finalizing Qt Dependencies (windeployqt)"
 echo "================================================="
 windeployqt --no-translations --no-compiler-runtime --dir "$DIST_DIR" "$DIST_DIR/$EXE_NAME"
 
+cp "./Bonjour SDK/Bin/x64/dnssd.dll" "$DIST_DIR/"
+cp "./Bonjour SDK/Bin/x64/mDNSResponder.exe" "$DIST_DIR/"
+
 echo "Copying icon"
 mkdir $DIST_DIR/resources
 cp $PROJECT_ROOT/stuff/newicon.ico $DIST_DIR/resources/icon.ico
+cp $PROJECT_ROOT/stuff/uxplay_arguments_list.txt $DIST_DIR/resources/uxplay_arguments_list.txt
 
 echo "================================================="
 echo " ✅ Done! Package is ready in $DIST_DIR"

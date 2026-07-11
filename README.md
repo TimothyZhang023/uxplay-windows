@@ -7,7 +7,7 @@
 Free as both in "freedom" and "free beer"!
 
 ## Installation
-Download the latest version of uxplay-windows from [**releases**](https://github.com/leapbtw/uxplay-windows/releases/latest).
+Download the latest version of uxplay-windows from [**releases**](https://github.com/TimothyZhang023/uxplay-windows/releases/latest).
 
 After installing, control uxplay-windows from it's [tray icon](https://www.odu.edu/sites/default/files/documents/win10-system-tray.pdf)! Right-click it to start or stop AirPlay. \
 You can also set it to run automatically when your PC starts
@@ -24,9 +24,11 @@ You can also set it to run automatically when your PC starts
 
 > [!TIP]
 > *My \<apple device\> can't connect to my PC!!!*
-> 1. Check if the `uxplay-windows.exe` is running: right-click the tray icon and restart it.
+> 1. Check the discovery status shown in the app. If it is degraded, choose `Retry Bonjour Discovery` from the tray menu.
 > 2. Toggle Wi-Fi and Bluetooth OFF on your iPhone/iPad/Mac, wait a couple of seconds and reconnect. It might take a few attempts.
-> 3. As last resort, close uxplay-windows, open Task Manager and restart `Bonjour Service` from the Services tab. Then reopen uxplay-windows and try again
+> 3. Use `Open Log File` from the tray menu and attach the log when reporting a problem.
+>
+> Bonjour failure no longer stops the receiver. It continues with Bluetooth fallback and shows a warning. The BLE helper cycles through active IPv4 interfaces, which improves discovery on VPN, Wi-Fi + Ethernet and direct-cable networks.
 
 > [!IMPORTANT]
 > *Why is Windows Defender complaining during installation?*
@@ -35,7 +37,9 @@ You can also set it to run automatically when your PC starts
 >
 > Just click on `More info` and it will let you install. It complains because the executable is not signed. If you don't trust this software you can always build it yourself! See below.
 >
-> If prompted by Windows Firewall, please **allow** uxplay-windows to ensure it functions properly.
+> The MSI installer adds local-network firewall rules for `uxplay-engine.exe`
+> and Bonjour UDP 5353 discovery. Portable ZIP users must allow `uxplay-engine.exe`
+> and `mDNSResponder.exe` when prompted by Windows Firewall.
 
 
 > [!NOTE]

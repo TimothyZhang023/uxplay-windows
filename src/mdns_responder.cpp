@@ -8,6 +8,29 @@
 
 namespace mdns
 {
+namespace {
+constexpr DWORD kProcessTimeoutMs = 120000;
+
+int waitForProcess(HANDLE process)
+{
+    DWORD waitResult = WaitForSingleObject(process, kProcessTimeoutMs);
+    if (waitResult == WAIT_TIMEOUT) {
+        TerminateProcess(process, ERROR_TIMEOUT);
+        WaitForSingleObject(process, 5000);
+        return 3;
+    }
+    if (waitResult != WAIT_OBJECT_0) {
+        return 1;
+    }
+
+    DWORD exitCode = 0;
+    if (!GetExitCodeProcess(process, &exitCode)) {
+        return 1;
+    }
+    return exitCode == 0 ? 0 : 2;
+}
+} // namespace
+
 static std::wstring getProcessExeDir()
 {
     wchar_t buf[MAX_PATH];
@@ -49,15 +72,10 @@ static int launchMdnsResponder(const std::wstring& dir,
     );
 
     if (ok) {
-        WaitForSingleObject(pi.hProcess, INFINITE);
-
-        DWORD exitCode = 0;
-        GetExitCodeProcess(pi.hProcess, &exitCode);
-
+        int result = waitForProcess(pi.hProcess);
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
-
-        return exitCode == 0 ? 0 : 2;
+        return result;
     }
 
     DWORD err = GetLastError();
@@ -84,14 +102,9 @@ static int launchMdnsResponder(const std::wstring& dir,
     }
 
     if (sei.hProcess) {
-        WaitForSingleObject(sei.hProcess, INFINITE);
-
-        DWORD exitCode = 0;
-        GetExitCodeProcess(sei.hProcess, &exitCode);
-
+        int result = waitForProcess(sei.hProcess);
         CloseHandle(sei.hProcess);
-
-        return exitCode == 0 ? 0 : 2;
+        return result;
     }
 
     return 0;
