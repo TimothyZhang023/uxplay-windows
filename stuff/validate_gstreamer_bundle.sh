@@ -23,7 +23,8 @@ VALIDATOR_WIN="$(cygpath -w "$VALIDATOR_DIR/gst-inspect-1.0.exe")"
 REGISTRY_WIN="$(cygpath -w "$VALIDATOR_DIR/registry.bin")"
 
 echo "Validating required GStreamer plugins using only packaged DLLs..."
-for plugin in app libav playback autodetect videoparsersbad; do
+for plugin in app libav playback autodetect videoparsersbad \
+              d3d11videosink d3d12videosink h264parse h265parse; do
   powershell.exe -NoProfile -NonInteractive -Command "
     \$ErrorActionPreference = 'Stop'
     \$env:PATH = '$DIST_WIN;' + \$env:SystemRoot + '\\System32;' + \$env:SystemRoot

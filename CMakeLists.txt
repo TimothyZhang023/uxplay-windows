@@ -17,6 +17,9 @@ add_executable(uxplay-engine
     src/engine_main.cpp
 )
 target_link_libraries(uxplay-engine PRIVATE uxplay)
+if(WIN32)
+    target_link_libraries(uxplay-engine PRIVATE winmm)
+endif()
 target_include_directories(uxplay-engine PRIVATE
     ${CMAKE_SOURCE_DIR}/libuxplay
 )

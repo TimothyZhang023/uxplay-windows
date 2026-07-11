@@ -36,6 +36,17 @@ You can also set it to run automatically when your PC starts
 > consecutive startup failures instead of continuously switching between
 > `starting` and `stopped`; use `Retry UxPlay Engine` after checking the logs.
 
+### Windows video performance
+
+- The default profile requests 1920×1080 at up to 60 FPS and uses the D3D11
+  renderer. 1440p60, 4K60 HEVC and a 1080p30 compatibility profile are
+  available in the main window.
+- Low latency mode bounds the decoder queue, disables timestamp-delayed video
+  presentation, lowers the advertised audio latency and enables a 1 ms Windows
+  timer resolution while the engine is running.
+- `Alt+Enter` toggles borderless fullscreen while the AirPlay video window is
+  focused. Fullscreen can also be toggled from the tray menu.
+
 > [!IMPORTANT]
 > *Why is Windows Defender complaining during installation?*
 > 
