@@ -129,6 +129,8 @@ cp "$GST_SCANNER" "$DIST_DIR/libexec/gstreamer-1.0/"
 echo "================================================="
 echo " 5. Finalizing Qt Dependencies (windeployqt)"
 echo "================================================="
+
+bash "$PROJECT_ROOT/stuff/copy_directx_shader_runtime.sh" "$DIST_DIR"
 windeployqt --no-translations --no-compiler-runtime \
   --dir "$DIST_DIR" "$DIST_DIR/$EXE_NAME"
 
@@ -160,6 +162,8 @@ for required in \
   "$DIST_DIR/$ENGINE_EXE" \
   "$DIST_DIR/$BEACON_EXE" \
   "$DIST_DIR/dnssd.dll" \
+  "$DIST_DIR/dxcompiler.dll" \
+  "$DIST_DIR/dxil.dll" \
   "$DIST_DIR/mDNSResponder.exe" \
   "$DIST_DIR/libexec/gstreamer-1.0/gst-plugin-scanner.exe" \
   "$DIST_DIR/resources/uxplay_arguments_list.txt"; do

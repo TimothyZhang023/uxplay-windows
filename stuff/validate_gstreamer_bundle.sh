@@ -7,6 +7,13 @@ RUNTIME_PREFIX="${MSYSTEM_PREFIX:-/ucrt64}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 GST_INSPECT_SOURCE="$RUNTIME_PREFIX/bin/gst-inspect-1.0.exe"
 
+for runtime in dxcompiler.dll dxil.dll; do
+  if [ ! -s "$DIST_DIR/$runtime" ]; then
+    echo "ERROR: required D3D12 runtime is missing: $DIST_DIR/$runtime" >&2
+    exit 1
+  fi
+done
+
 if [ ! -s "$GST_INSPECT_SOURCE" ]; then
   echo "ERROR: gst-inspect-1.0.exe not found: $GST_INSPECT_SOURCE" >&2
   exit 1
