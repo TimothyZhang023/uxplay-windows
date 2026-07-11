@@ -5,10 +5,16 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <mmsystem.h>
 #endif
 
 namespace {
+bool g_highResolutionTimer = false;
+
 void logNormalExit() {
+#ifdef _WIN32
+    if (g_highResolutionTimer) timeEndPeriod(1);
+#endif
     fprintf(stderr, "[engine-wrapper] process is exiting\n");
     fflush(stderr);
 }
@@ -34,6 +40,12 @@ int main(int argc, char *argv[]) {
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
     SetUnhandledExceptionFilter(logUnhandledException);
+    if (const char *lowLatency = std::getenv("UXPLAY_LOW_LATENCY");
+        lowLatency && lowLatency[0] == '1') {
+        g_highResolutionTimer = (timeBeginPeriod(1) == TIMERR_NOERROR);
+        fprintf(stderr, "[engine-wrapper] low-latency timer resolution: %s\n",
+                g_highResolutionTimer ? "1 ms" : "unavailable");
+    }
 #endif
     std::atexit(logNormalExit);
     fprintf(stderr, "[engine-wrapper] starting uxplay engine\n");

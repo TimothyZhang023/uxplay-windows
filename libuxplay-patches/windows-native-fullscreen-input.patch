@@ -1,0 +1,197 @@
+diff --git a/renderers/video_renderer.c b/renderers/video_renderer.c
+index ea1c450..f949565 100644
+--- a/renderers/video_renderer.c
++++ b/renderers/video_renderer.c
+@@ -26,8 +26,10 @@
+ 
+ #define SECOND_IN_NSECS 1000000000UL
+ #define SECOND_IN_MICROSECS 1000000
+-#ifdef X_DISPLAY_FIX
++#if defined(X_DISPLAY_FIX) || defined(_WIN32)
+ #include <gst/video/navigation.h>
++#endif
++#ifdef X_DISPLAY_FIX
+ #include "x_display_fix.h"
+ static bool fullscreen = false;
+ static bool alt_keypress = false;
+@@ -84,6 +86,9 @@ struct video_renderer_s {
+     int id;
+     char *uri;
+     gboolean eos;
++    gboolean f11_down;
++    gboolean initial_fullscreen;
++    gboolean fullscreen_initialized;
+     gint64 duration;
+     gint buffering_level;
+ #ifdef  X_DISPLAY_FIX
+@@ -222,6 +227,97 @@ GstElement *make_video_sink(const char *videosink, const char *videosink_options
+     return video_sink;
+ }
+ 
++#ifdef _WIN32
++static gboolean windows_boolean_property(GObject *object, const char *name) {
++    GParamSpec *property = g_object_class_find_property(
++        G_OBJECT_GET_CLASS(object), name);
++    return property && G_PARAM_SPEC_VALUE_TYPE(property) == G_TYPE_BOOLEAN;
++}
++
++static gboolean configure_windows_fullscreen_sink(video_renderer_t *renderer,
++                                                   GstElement *sink) {
++    if (!windows_boolean_property(G_OBJECT(sink), "fullscreen")) {
++        return FALSE;
++    }
++
++    GObjectClass *klass = G_OBJECT_GET_CLASS(sink);
++    if (windows_boolean_property(G_OBJECT(sink), "enable-navigation-events")) {
++        g_object_set(G_OBJECT(sink), "enable-navigation-events", TRUE, NULL);
++    }
++    if (g_object_class_find_property(klass, "fullscreen-toggle-mode")) {
++        /* PROPERTY deliberately excludes the sink's Alt+Enter handler. */
++        gst_util_set_object_arg(G_OBJECT(sink), "fullscreen-toggle-mode", "property");
++    }
++    if (windows_boolean_property(G_OBJECT(sink), "fullscreen-on-alt-enter")) {
++        g_object_set(G_OBJECT(sink), "fullscreen-on-alt-enter", FALSE, NULL);
++    }
++    if (!renderer->fullscreen_initialized) {
++        if (renderer->initial_fullscreen) {
++            g_object_set(G_OBJECT(sink), "fullscreen", TRUE, NULL);
++        }
++        renderer->fullscreen_initialized = TRUE;
++    }
++    return TRUE;
++}
++
++static GstElement *find_windows_fullscreen_sink(video_renderer_t *renderer,
++                                                GstObject *source) {
++    if (GST_IS_ELEMENT(source) && configure_windows_fullscreen_sink(
++            renderer, GST_ELEMENT(source))) {
++        return GST_ELEMENT(gst_object_ref(source));
++    }
++
++    GstIterator *iterator = gst_bin_iterate_recurse(GST_BIN(renderer->pipeline));
++    GValue item = G_VALUE_INIT;
++    GstElement *sink = NULL;
++    gboolean done = FALSE;
++    while (!done) {
++        switch (gst_iterator_next(iterator, &item)) {
++        case GST_ITERATOR_OK: {
++            GstElement *element = GST_ELEMENT(g_value_get_object(&item));
++            if (configure_windows_fullscreen_sink(renderer, element)) {
++                sink = GST_ELEMENT(gst_object_ref(element));
++                done = TRUE;
++            }
++            g_value_reset(&item);
++            break;
++        }
++        case GST_ITERATOR_RESYNC:
++            gst_iterator_resync(iterator);
++            break;
++        default:
++            done = TRUE;
++            break;
++        }
++    }
++    if (G_VALUE_TYPE(&item) != 0) {
++        g_value_unset(&item);
++    }
++    gst_iterator_free(iterator);
++    return sink;
++}
++
++static gboolean toggle_windows_fullscreen(video_renderer_t *renderer,
++                                          GstMessage *message) {
++    GstElement *sink = find_windows_fullscreen_sink(
++        renderer, GST_MESSAGE_SRC(message));
++    if (!sink) {
++        logger_log(logger, LOGGER_WARNING,
++                   "Fullscreen input received, but active videosink has no fullscreen property");
++        return FALSE;
++    }
++
++    gboolean fullscreen = FALSE;
++    g_object_get(G_OBJECT(sink), "fullscreen", &fullscreen, NULL);
++    fullscreen = !fullscreen;
++    g_object_set(G_OBJECT(sink), "fullscreen", fullscreen, NULL);
++    logger_log(logger, LOGGER_INFO, "Windows D3D fullscreen toggled %s",
++               fullscreen ? "on" : "off");
++    gst_object_unref(sink);
++    return TRUE;
++}
++#endif
++
+ void video_renderer_init(logger_t *render_logger, const char *server_name, videoflip_t videoflip[2], const char *parser, const char * rtp_pipeline,
+                           const char *decoder, const char *converter, const char *videosink, const char *videosink_options, 
+                           bool initial_fullscreen, bool video_sync, bool h265_support, bool coverart_support, guint playbin_version, const char *uri) {
+@@ -281,6 +377,9 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
+         renderer_type[i]->textsrc = NULL;
+         renderer_type[i]->uri = NULL;
+         renderer_type[i]->eos = FALSE;
++        renderer_type[i]->f11_down = FALSE;
++        renderer_type[i]->initial_fullscreen = initial_fullscreen;
++        renderer_type[i]->fullscreen_initialized = FALSE;
+         if (hls_video) {
+             renderer_type[i]->uri = (char *) calloc(strlen(uri) + 1, sizeof(char));
+             memcpy(renderer_type[i]->uri, uri, strlen(uri));
+@@ -919,6 +1018,15 @@ static gboolean gstreamer_video_pipeline_bus_callback(GstBus *bus, GstMessage *m
+         }
+         break;
+     case GST_MESSAGE_STATE_CHANGED:
++#ifdef _WIN32
++        if (GST_IS_ELEMENT(GST_MESSAGE_SRC(message))) {
++            /* autovideosink creates its real D3D child lazily. Configure each
++             * candidate as it appears so navigation works and Alt+Enter stays
++             * disabled even in Automatic/Software compatibility modes. */
++            configure_windows_fullscreen_sink(
++                renderer, GST_ELEMENT(GST_MESSAGE_SRC(message)));
++        }
++#endif
+         if (hls_video && strstr(GST_MESSAGE_SRC_NAME(message), "hls-playbin")) {
+             GstState old_state, new_state;
+             gst_message_parse_state_changed (message, &old_state, &new_state, NULL);
+@@ -968,7 +1076,44 @@ static gboolean gstreamer_video_pipeline_bus_callback(GstBus *bus, GstMessage *m
+             }
+         }
+         break;
+-#ifdef  X_DISPLAY_FIX
++#ifdef _WIN32
++    case GST_MESSAGE_ELEMENT: {
++        GstNavigationMessageType message_type = gst_navigation_message_get_type(message);
++        if (message_type != GST_NAVIGATION_MESSAGE_EVENT) break;
++
++        GstEvent *event = NULL;
++        if (!gst_navigation_message_parse_event(message, &event) || !event) break;
++
++        GstNavigationEventType event_type = gst_navigation_event_get_type(event);
++        if (event_type == GST_NAVIGATION_EVENT_KEY_PRESS) {
++            const gchar *key = NULL;
++            if (gst_navigation_event_parse_key_event(event, &key) &&
++                key && g_ascii_strcasecmp(key, "F11") == 0) {
++                if (!renderer->f11_down) {
++                    renderer->f11_down = TRUE;
++                    toggle_windows_fullscreen(renderer, message);
++                }
++            }
++        } else if (event_type == GST_NAVIGATION_EVENT_KEY_RELEASE) {
++            const gchar *key = NULL;
++            if (gst_navigation_event_parse_key_event(event, &key) &&
++                key && g_ascii_strcasecmp(key, "F11") == 0) {
++                renderer->f11_down = FALSE;
++            }
++#if GST_CHECK_VERSION(1, 26, 0)
++        } else if (event_type == GST_NAVIGATION_EVENT_MOUSE_DOUBLE_CLICK) {
++            gint button = 0;
++            gdouble x = 0.0, y = 0.0;
++            if (gst_navigation_event_parse_mouse_button_event(
++                    event, &button, &x, &y) && button == 1) {
++                toggle_windows_fullscreen(renderer, message);
++            }
++        }
++#endif
++        gst_event_unref(event);
++        break;
++    }
++#elif defined(X_DISPLAY_FIX)
+     case GST_MESSAGE_ELEMENT:
+         if (renderer->gst_window && renderer->gst_window->window) {
+             GstNavigationMessageType message_type = gst_navigation_message_get_type (message);
+
