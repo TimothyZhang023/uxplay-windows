@@ -38,14 +38,21 @@ You can also set it to run automatically when your PC starts
 
 ### Windows video performance
 
-- The default profile requests 1920×1080 at up to 60 FPS and uses the D3D11
-  renderer. 1440p60, 4K60 HEVC and a 1080p30 compatibility profile are
-  available in the main window.
-- Low latency mode bounds the decoder queue, disables timestamp-delayed video
-  presentation, lowers the advertised audio latency and enables a 1 ms Windows
-  timer resolution while the engine is running.
-- `Alt+Enter` toggles borderless fullscreen while the AirPlay video window is
-  focused. Fullscreen can also be toggled from the tray menu.
+- The default profile requests 1920×1080 at up to 60 FPS and lets GStreamer
+  select the renderer. Explicit paired D3D11/D3D12 hardware modes, 1440p60,
+  4K60 HEVC and a 1080p30 compatibility profile are available in the main
+  window. A failed hardware pipeline automatically falls back to software
+  decoding once instead of entering a restart loop.
+- Low latency mode disables timestamp-delayed video presentation, lowers the
+  advertised audio latency and enables a 1 ms Windows timer resolution while
+  the engine is running. It is experimental and defaults to off. Compressed
+  H.264/H.265 frames are never discarded, because doing so corrupts inter-frame
+  references and causes macroblocking.
+- Double-click the video or press `F11` to enter or leave fullscreen.
+  `Alt+Enter` is disabled. Input and fullscreen changes are handled by the
+  GStreamer-owned window rather than by cross-process Win32 window changes.
+- Video-setting changes are saved during an active AirPlay session and applied
+  after the session ends, avoiding an unexpected renderer shutdown mid-stream.
 
 > [!IMPORTANT]
 > *Why is Windows Defender complaining during installation?*

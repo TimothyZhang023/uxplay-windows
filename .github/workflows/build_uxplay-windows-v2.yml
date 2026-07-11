@@ -217,7 +217,7 @@ jobs:
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             tag="${{ inputs.release_tag }}"
           else
-            tag="v2.2.0-performance-${{ github.run_number }}"
+            tag="v2.2.1-stability-${{ github.run_number }}"
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           (cd dist && sha256sum uxplaywindows-installer.msi uxplay-windows.zip > SHA256SUMS.txt)
