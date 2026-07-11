@@ -13,7 +13,6 @@
 #include <QFile>
 #include <QMessageBox>
 #include <QPointer>
-#include <QRect>
 
 class QMenu;
 class QAction;
@@ -28,8 +27,6 @@ public:
 
 protected:
     void closeEvent(QCloseEvent *event) override;
-    bool nativeEvent(const QByteArray &eventType, void *message,
-                     qintptr *result) override;
 
 private slots:
     void onTrayActivated(QSystemTrayIcon::ActivationReason reason);
@@ -44,7 +41,6 @@ private slots:
     void toggleBle(bool checked); // bluetooth
     void toggleForceFullscreen(bool checked);
     void toggleLowLatency(bool checked);
-    void toggleVideoFullscreen();
     void onRendererChanged(int index);
     void onQualityChanged(int index);
 
@@ -60,9 +56,7 @@ private:
     void applyRendererAndFullscreenArgs(QStringList &args);
     void applyQualityAndLatencyArgs(QStringList &args);
     void restartEngineForSettings(const QString &message);
-    quintptr findVideoWindow() const;
-    void setVideoFullscreen(bool fullscreen);
-    void monitorVideoWindow();
+    bool fallbackToSoftwareRenderer(const QString &reason);
     void showDiscoveryFallbackWarning();
     void handleEngineOutput(QProcess *engine);
     void markEngineReady();
@@ -94,7 +88,6 @@ private:
     QAction *m_statusAction = nullptr;
     QAction *m_retryBonjourAction = nullptr;
     QAction *m_retryEngineAction = nullptr;
-    QAction *m_toggleFullscreenAction = nullptr;
 
     QPushButton *m_autostartBtn = nullptr;
     QPushButton *m_settingsBtn = nullptr;
@@ -102,16 +95,13 @@ private:
     QPushButton *m_licenseBtn = nullptr;
     QPushButton *m_logsBtn = nullptr;
     QLabel *m_statusLabel = nullptr;
-    QTimer *m_windowMonitorTimer = nullptr;
 
     QPointer<QProcess> m_engine;
     QByteArray m_engineOutputBuffer;
+    QByteArray m_engineLineBuffer;
     QFile m_engineLogFile;
     quint64 m_enginePid = 0;
     qint64 m_engineStartedAtMs = 0;
-    quintptr m_videoWindow = 0;
-    qintptr m_windowedStyle = 0;
-    QRect m_windowedRect;
 
     bool m_running = false;
     bool m_starting = false;
@@ -121,8 +111,9 @@ private:
     bool m_bleAvailable = false;
     bool m_engineWasReady = false;
     bool m_engineRestartPending = false;
-    bool m_videoFullscreen = false;
-    bool m_altEnterHotkeyRegistered = false;
+    bool m_streaming = false;
+    bool m_settingsRestartPending = false;
+    bool m_rendererFallbackAttempted = false;
     bool m_registryRepairAttempted = false;
     int m_consecutiveEngineFailures = 0;
     QString m_lastEngineFailure;

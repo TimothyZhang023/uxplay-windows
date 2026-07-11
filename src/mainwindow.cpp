@@ -34,21 +34,41 @@
 #include <QVBoxLayout>
 #include <QTextStream>
 
-struct WindowSearchData {
-    DWORD pid;
-    HWND window = nullptr;
-};
-
 namespace {
 constexpr DWORD kServiceMissing = 0;
 constexpr DWORD kBonjourStartTimeoutMs = 15000;
 constexpr DWORD kBonjourPollMs = 250;
 constexpr int kMaximumStartupFailures = 3;
-constexpr qint64 kMinimumHealthyLifetimeMs = 5000;
-constexpr int kAltEnterHotkeyId = 0x5558;
-#ifndef MOD_NOREPEAT
-#define MOD_NOREPEAT 0x4000
-#endif
+constexpr qint64 kMinimumHealthyLifetimeMs = 30000;
+
+bool containsVideoPipelineFailure(const QByteArray &output) {
+    const QByteArray lower = output.toLower();
+    if (lower.contains("failed to initialize gstreamer video renderer") ||
+           lower.contains("unable to construct a working video pipeline") ||
+           lower.contains("no element \"d3d11h264dec\"") ||
+           lower.contains("no element \"d3d11h265dec\"") ||
+           lower.contains("no element \"d3d12h264dec\"") ||
+           lower.contains("no element \"d3d12h265dec\"")) {
+        return true;
+    }
+
+    // Only classify complete, renderer-specific errors. Network disconnects,
+    // corrupt sender frames and the normal D3D window-close message must not
+    // permanently change the user's renderer.
+    for (const QByteArray &line : lower.split('\n')) {
+        if (!line.contains("gstreamer error (video)") ||
+            line.contains("output window was closed")) {
+            continue;
+        }
+        if (line.contains("internal data stream error") ||
+            line.contains("not-negotiated") ||
+            line.contains("device lost") ||
+            line.contains("failed to initialize")) {
+            return true;
+        }
+    }
+    return false;
+}
 
 QString diagnosticDirectory() {
     return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
@@ -228,25 +248,6 @@ QString stableDeviceId() {
 }
 } // namespace
 
-BOOL CALLBACK EnumWindowsProcFindVideo(HWND hwnd, LPARAM lParam) {
-    auto *data = reinterpret_cast<WindowSearchData *>(lParam);
-    DWORD windowPid = 0;
-    GetWindowThreadProcessId(hwnd, &windowPid);
-    if (windowPid != data->pid || !IsWindowVisible(hwnd) ||
-        GetWindow(hwnd, GW_OWNER) != nullptr) {
-        return TRUE;
-    }
-
-    RECT rect{};
-    if (!GetWindowRect(hwnd, &rect) || rect.right <= rect.left ||
-        rect.bottom <= rect.top) {
-        return TRUE;
-    }
-
-    data->window = hwnd;
-    return FALSE;
-}
-
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     ensureSettingsFileExists();
     setupTray();
@@ -265,9 +266,6 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
 
 MainWindow::~MainWindow() {
     m_quitting = true;
-    if (m_altEnterHotkeyRegistered) {
-        UnregisterHotKey(reinterpret_cast<HWND>(winId()), kAltEnterHotkeyId);
-    }
     stopServer();
 }
 
@@ -314,10 +312,6 @@ void MainWindow::setupUI() {
     m_statusLabel->setWordWrap(true);
     layout->addWidget(m_statusLabel);
 
-    m_windowMonitorTimer = new QTimer(this);
-    connect(m_windowMonitorTimer, &QTimer::timeout,
-            this, &MainWindow::monitorVideoWindow);
-
     // Bluetooth Discovery Checkbox
     m_bleCheckbox = new QCheckBox("Enable Bluetooth Discovery", this);
     QSettings settings;
@@ -326,7 +320,15 @@ void MainWindow::setupUI() {
     layout->addWidget(m_bleCheckbox);
 
     // Force Fullscreen Checkbox
-    m_fullscreenCheckbox = new QCheckBox("Start video in fullscreen", this);
+    m_fullscreenCheckbox = new QCheckBox("Start D3D video in fullscreen", this);
+    m_fullscreenCheckbox->setToolTip(
+        "Double-click the video or press F11 to enter/leave fullscreen. Alt+Enter is disabled.");
+    if (!settings.value("native_fullscreen_defaults_v2", false).toBool()) {
+        // v2.2.0 used cross-process window manipulation. Start the new native
+        // D3D path windowed once so stale fullscreen state cannot affect startup.
+        settings.setValue("force_fs_enabled", false);
+        settings.setValue("native_fullscreen_defaults_v2", true);
+    }
     m_fullscreenCheckbox->setChecked(
         settings.value("force_fs_enabled", false).toBool()
     );
@@ -335,11 +337,15 @@ void MainWindow::setupUI() {
     layout->addWidget(m_fullscreenCheckbox);
 
     m_lowLatencyCheckbox = new QCheckBox(
-        "Low latency mode (recommended for mirroring)", this);
+        "Low latency mode (experimental; may reduce A/V sync)", this);
+    if (!settings.value("low_latency_defaults_v2", false).toBool()) {
+        settings.setValue("low_latency_enabled", false);
+        settings.setValue("low_latency_defaults_v2", true);
+    }
     m_lowLatencyCheckbox->setChecked(
-        settings.value("low_latency_enabled", true).toBool());
+        settings.value("low_latency_enabled", false).toBool());
     m_lowLatencyCheckbox->setToolTip(
-        "Keeps only the newest frames. Disable if audio/video synchronization is more important than latency.");
+        "Disables timestamp-delayed presentation. Disable if audio/video synchronization is more important than latency.");
     connect(m_lowLatencyCheckbox, &QCheckBox::toggled,
             this, &MainWindow::toggleLowLatency);
     layout->addWidget(m_lowLatencyCheckbox);
@@ -363,21 +369,30 @@ void MainWindow::setupUI() {
 
     // Renderer dropdown
     m_rendererCombo = new QComboBox(this);
-    m_rendererCombo->addItem("Renderer: D3D11 (Recommended)", "d3d11");
-    m_rendererCombo->addItem("Renderer: D3D12", "d3d12");
-    m_rendererCombo->addItem("Renderer: Automatic (Compatibility)", "auto");
+    m_rendererCombo->addItem("Renderer: Automatic (Recommended)", "auto");
+    m_rendererCombo->addItem("Renderer: D3D11 Hardware", "d3d11");
+    m_rendererCombo->addItem("Renderer: D3D12 Hardware", "d3d12");
+    m_rendererCombo->addItem("Renderer: Software Decode (Compatibility)", "software");
     m_rendererCombo->setToolTip(
-        "D3D11 normally provides the best Windows compatibility and GPU acceleration.");
+        "Automatic lets GStreamer choose. Hardware modes pair the decoder and sink; failures fall back to software once.");
 
     {
-        QString saved = settings.value("renderer_mode", "d3d11").toString();
-        if (!settings.value("performance_defaults_v1", false).toBool()) {
-            if (saved == "auto") saved = "d3d11";
+        const bool hadSavedRenderer = settings.contains("renderer_mode");
+        QString saved = settings.value("renderer_mode", "auto").toString();
+        if (!settings.value("renderer_stability_defaults_v2", false).toBool()) {
+            // Existing v2.2.0 installations may have been forced onto a D3D
+            // mode that their adapter cannot initialize. Migrate them once to
+            // the known-safe path; fresh installations keep Automatic.
+            if (hadSavedRenderer && saved != "software") saved = "software";
             settings.setValue("renderer_mode", saved);
+            settings.setValue("renderer_stability_defaults_v2", true);
+        }
+        if (!settings.value("performance_defaults_v1", false).toBool()) {
             settings.setValue("performance_defaults_v1", true);
         }
         int idx = m_rendererCombo->findData(saved);
-        if (idx >= 0) m_rendererCombo->setCurrentIndex(idx);
+        if (idx < 0) idx = m_rendererCombo->findData("software");
+        m_rendererCombo->setCurrentIndex(idx);
     }
 
     connect(m_rendererCombo,
@@ -408,15 +423,6 @@ void MainWindow::setupUI() {
     layout->addWidget(m_licenseBtn);
 
     layout->addStretch();
-    m_altEnterHotkeyRegistered = RegisterHotKey(
-        reinterpret_cast<HWND>(winId()),
-        kAltEnterHotkeyId,
-        MOD_ALT | MOD_NOREPEAT,
-        VK_RETURN);
-    if (!m_altEnterHotkeyRegistered) {
-        qWarning() << "Could not register Alt+Enter fullscreen hotkey. Error="
-                   << GetLastError();
-    }
     updateStatus();
 }
 
@@ -451,9 +457,6 @@ void MainWindow::setupTray() {
         "Retry Bonjour Discovery", this, &MainWindow::retryBonjourDiscovery);
     m_retryEngineAction = m_trayMenu->addAction(
         "Retry UxPlay Engine", this, &MainWindow::retryEngine);
-    m_toggleFullscreenAction = m_trayMenu->addAction(
-        "Toggle Video Fullscreen (Alt+Enter)",
-        this, &MainWindow::toggleVideoFullscreen);
     m_trayMenu->addAction("Open Diagnostic Logs", this, &MainWindow::openLogFile);
     m_trayMenu->addSeparator();
     m_trayMenu->addAction("Quit", this, &MainWindow::quit);
@@ -486,17 +489,16 @@ void MainWindow::toggleBle(bool checked) {
 
 void MainWindow::toggleForceFullscreen(bool checked) {
     QSettings settings;
+    if (settings.value("force_fs_enabled", false).toBool() == checked) return;
     settings.setValue("force_fs_enabled", checked);
-    if (checked) {
-        setVideoFullscreen(true);
-    } else if (m_videoFullscreen) {
-        setVideoFullscreen(false);
-    }
+    restartEngineForSettings(
+        checked ? "Native D3D fullscreen enabled."
+                : "Native D3D fullscreen disabled.");
 }
 
 void MainWindow::toggleLowLatency(bool checked) {
     QSettings settings;
-    if (settings.value("low_latency_enabled", true).toBool() == checked) return;
+    if (settings.value("low_latency_enabled", false).toBool() == checked) return;
     settings.setValue("low_latency_enabled", checked);
     restartEngineForSettings(
         checked ? "Low latency pipeline enabled."
@@ -509,9 +511,10 @@ void MainWindow::onRendererChanged(int /*index*/) {
     QString mode = m_rendererCombo->currentData().toString();
 
     QSettings settings;
-    QString saved = settings.value("renderer_mode", "d3d11").toString();
+    QString saved = settings.value("renderer_mode", "auto").toString();
     if (saved == mode) return;
 
+    m_rendererFallbackAttempted = false;
     settings.setValue("renderer_mode", mode);
     restartEngineForSettings("Video renderer changed to " +
                              m_rendererCombo->currentText() + ".");
@@ -528,6 +531,17 @@ void MainWindow::onQualityChanged(int /*index*/) {
 }
 
 void MainWindow::restartEngineForSettings(const QString &message) {
+    if (m_streaming) {
+        m_settingsRestartPending = true;
+        if (m_tray) {
+            m_tray->showMessage(
+                "Video setting saved",
+                message + " It will be applied after the current AirPlay session ends.",
+                QSystemTrayIcon::Information, 5000);
+        }
+        return;
+    }
+    m_settingsRestartPending = false;
     if (m_tray) {
         m_tray->showMessage("uxplay-windows", message + " Restarting UxPlay engine...",
                             QSystemTrayIcon::Information, 3000);
@@ -539,6 +553,35 @@ void MainWindow::restartEngineForSettings(const QString &message) {
     QTimer::singleShot(250, this, [this]() {
         if (!m_quitting && !m_engine) startServer();
     });
+}
+
+bool MainWindow::fallbackToSoftwareRenderer(const QString &reason) {
+    if (m_rendererFallbackAttempted || !m_rendererCombo ||
+        m_rendererCombo->currentData().toString() == "software") {
+        return false;
+    }
+
+    const int softwareIndex = m_rendererCombo->findData("software");
+    if (softwareIndex < 0) return false;
+
+    m_rendererFallbackAttempted = true;
+    {
+        QSignalBlocker blocker(m_rendererCombo);
+        m_rendererCombo->setCurrentIndex(softwareIndex);
+    }
+    QSettings().setValue("renderer_mode", "software");
+    const QString conciseReason = reason.trimmed().left(240);
+    appendEngineLog(QString(
+        "[supervisor] video renderer failed; selected software compatibility mode: %1\n")
+        .arg(conciseReason).toUtf8());
+    if (m_tray) {
+        m_tray->showMessage(
+            "Video renderer fallback",
+            "The selected video pipeline failed. Software compatibility mode will be used.\n" +
+                conciseReason,
+            QSystemTrayIcon::Warning, 8000);
+    }
+    return true;
 }
 
 void MainWindow::applyRendererAndFullscreenArgs(QStringList &args) {
@@ -558,26 +601,41 @@ void MainWindow::applyRendererAndFullscreenArgs(QStringList &args) {
         }
         ++i;
     }
+    removeOptionWithValue(args, "-vd");
+    while (args.removeOne("-avdec")) {}
 
     QString mode = "auto";
     if (m_rendererCombo) {
         mode = m_rendererCombo->currentData().toString();
     }
+    const bool fullscreen = m_fullscreenCheckbox &&
+                            m_fullscreenCheckbox->isChecked();
+    if (fullscreen) args << "-fs";
 
     if (mode == "d3d11") {
-        args << "-vs"
-             << QString("d3d11videosink force-aspect-ratio=true fullscreen-toggle-mode=%1")
-                    .arg(m_altEnterHotkeyRegistered ? "none" : "alt-enter");
+        QString sink = "d3d11videosink enable-navigation-events=true "
+                       "fullscreen-toggle-mode=property";
+        if (fullscreen) sink += " fullscreen=true";
+        args << "-vd" << "d3d11h264dec" << "-vs" << sink;
     } else if (mode == "d3d12") {
-        args << "-vs"
-             << QString("d3d12videosink force-aspect-ratio=true fullscreen-on-alt-enter=%1")
-                    .arg(m_altEnterHotkeyRegistered ? "false" : "true");
+        QString sink = "d3d12videosink enable-navigation-events=true "
+                       "fullscreen-on-alt-enter=false";
+        if (fullscreen) sink += " fullscreen=true";
+        args << "-vd" << "d3d12h264dec" << "-vs" << sink;
+    } else if (mode == "software") {
+        // Keep the output sink automatic so compatibility mode is not tied to
+        // a D3D API that may be unavailable on this adapter.
+        args << "-avdec";
     }
 }
 
 void MainWindow::applyQualityAndLatencyArgs(QStringList &args) {
     removeOptionWithValue(args, "-s");
     removeOptionWithValue(args, "-fps");
+    // These switches are owned by the checkbox. Remove stale values even when
+    // low-latency mode is disabled so UI state and the launched engine agree.
+    removeOptionWithValue(args, "-vsync", true);
+    removeOptionWithValue(args, "-al");
 
     const QString profile = m_qualityCombo
         ? m_qualityCombo->currentData().toString()
@@ -588,24 +646,22 @@ void MainWindow::applyQualityAndLatencyArgs(QStringList &args) {
     } else if (profile == "1440p60") {
         args << "-s" << "2560x1440@60" << "-fps" << "60";
     } else if (profile == "1080p30") {
-        args << "-s" << "1920x1080@60" << "-fps" << "30";
+        args << "-s" << "1920x1080@30" << "-fps" << "30";
     } else {
         args << "-s" << "1920x1080@60" << "-fps" << "60";
     }
 
-    if (!m_lowLatencyCheckbox || !m_lowLatencyCheckbox->isChecked()) return;
+    const bool compatibilityProfile = profile == "1080p30";
+    if (!m_lowLatencyCheckbox || !m_lowLatencyCheckbox->isChecked() ||
+        compatibilityProfile) {
+        return;
+    }
 
-    removeOptionWithValue(args, "-vsync", true);
-    removeOptionWithValue(args, "-al");
     args << "-vsync" << "no" << "-al" << "0.15";
 
-    // A small leaky queue after the parser prevents decoder or presentation
-    // stalls from accumulating old frames. The upstream queue then remains
-    // drained because this queue never back-pressures it.
-    if (!args.contains("-vp")) {
-        args << "-vp"
-             << "h264parse ! queue leaky=downstream max-size-buffers=3 max-size-bytes=0 max-size-time=0";
-    }
+    // Never drop compressed H.264/H.265 buffers before decoding. Inter-frame
+    // codecs depend on reference frames; dropping them causes visible macroblock
+    // corruption until the next keyframe.
 }
 
 void MainWindow::startServer() {
@@ -675,7 +731,10 @@ void MainWindow::startServer() {
     auto *engine = new QProcess(this);
     m_engine = engine;
     m_engineOutputBuffer.clear();
+    m_engineLineBuffer.clear();
     m_engineWasReady = false;
+    m_streaming = false;
+    m_settingsRestartPending = false;
     m_engineStartedAtMs = QDateTime::currentMSecsSinceEpoch();
 
     const QString engineLogPath = diagnosticDirectory() + "/uxplay-engine.log";
@@ -701,9 +760,12 @@ void MainWindow::startServer() {
     engine->setArguments(args);
     engine->setWorkingDirectory(QApplication::applicationDirPath());
     QProcessEnvironment engineEnvironment = QProcessEnvironment::systemEnvironment();
-    engineEnvironment.insert(
-        "UXPLAY_LOW_LATENCY",
-        (m_lowLatencyCheckbox && m_lowLatencyCheckbox->isChecked()) ? "1" : "0");
+    const bool compatibilityProfile = m_qualityCombo &&
+        m_qualityCombo->currentData().toString() == "1080p30";
+    const bool effectiveLowLatency = m_lowLatencyCheckbox &&
+        m_lowLatencyCheckbox->isChecked() && !compatibilityProfile;
+    engineEnvironment.insert("UXPLAY_LOW_LATENCY",
+                             effectiveLowLatency ? "1" : "0");
     engine->setProcessEnvironment(engineEnvironment);
     engine->setProcessChannelMode(QProcess::MergedChannels);
 #ifdef _WIN32
@@ -758,6 +820,7 @@ void MainWindow::startServer() {
                                   engine->errorString();
             appendEngineLog(("[supervisor] " + m_lastEngineFailure + "\n").toUtf8());
             m_engineOutputBuffer.clear();
+            m_engineLineBuffer.clear();
             m_engineLogFile.close();
             updateStatus();
             engine->deleteLater();
@@ -816,17 +879,26 @@ void MainWindow::startServer() {
                 .toUtf8());
         }
 
+        const bool rendererFallbackSelected =
+            startupFailure && containsVideoPipelineFailure(m_engineOutputBuffer) &&
+            fallbackToSoftwareRenderer(m_lastEngineFailure);
+        if (rendererFallbackSelected) {
+            m_consecutiveEngineFailures = 0;
+        }
+
         m_engine.clear();
         m_enginePid = 0;
         m_starting = false;
         m_running = false;
-        if (m_windowMonitorTimer) m_windowMonitorTimer->stop();
+        m_streaming = false;
         engine->deleteLater();
         m_engineLogFile.close();
         m_engineOutputBuffer.clear();
+        m_engineLineBuffer.clear();
         updateStatus();
 
         if (!startupFailure ||
+            rendererFallbackSelected ||
             m_consecutiveEngineFailures < kMaximumStartupFailures) {
             scheduleEngineRestart();
         } else if (m_tray) {
@@ -847,21 +919,21 @@ void MainWindow::startServer() {
 
 void MainWindow::stopServer() {
     stopBluetoothBeacon();
-    if (m_windowMonitorTimer) m_windowMonitorTimer->stop();
-    if (m_videoFullscreen) setVideoFullscreen(false);
-    m_videoWindow = 0;
-    m_windowedStyle = 0;
-    m_windowedRect = QRect();
+    m_streaming = false;
     if (m_engine) {
         QProcess *engine = m_engine.data();
         m_engine.clear();
         disconnect(engine, nullptr, this, nullptr);
         if (engine->state() != QProcess::NotRunning) {
-            engine->terminate();
-            if (!engine->waitForFinished(3000)) {
-                qWarning() << "UxPlay engine did not exit; killing child process";
-                engine->kill();
-                engine->waitForFinished(1000);
+            // QProcess::terminate() posts WM_CLOSE to every top-level child
+            // window on Windows. That closes the GStreamer D3D window first
+            // and creates the misleading "Output window was closed" failure.
+            // The engine is process-isolated, so stop it directly instead.
+            appendEngineLog(
+                "[supervisor] stopping isolated engine without WM_CLOSE\n");
+            engine->kill();
+            if (!engine->waitForFinished(2000)) {
+                qWarning() << "UxPlay engine did not exit after TerminateProcess";
             }
         }
         handleEngineOutput(engine);
@@ -871,6 +943,7 @@ void MainWindow::stopServer() {
     if (m_engineLogFile.isOpen()) m_engineLogFile.close();
     m_enginePid = 0;
     m_engineOutputBuffer.clear();
+    m_engineLineBuffer.clear();
     m_starting = false;
     m_running = false;
     updateStatus();
@@ -883,6 +956,52 @@ void MainWindow::handleEngineOutput(QProcess *engine) {
 
     appendEngineLog(output);
     m_engineOutputBuffer += output;
+    m_engineLineBuffer += output;
+
+    QByteArray completeOutput;
+    while (true) {
+        const qsizetype newline = m_engineLineBuffer.indexOf('\n');
+        if (newline < 0) break;
+        completeOutput += m_engineLineBuffer.left(newline + 1);
+        m_engineLineBuffer.remove(0, newline + 1);
+    }
+    if (m_engineLineBuffer.size() > 8192) {
+        m_engineLineBuffer = m_engineLineBuffer.right(8192);
+    }
+
+    if (m_engine == engine) {
+        if (completeOutput.contains("raop_rtp_mirror starting mirroring") ||
+            completeOutput.contains("Begin streaming to GStreamer video pipeline")) {
+            m_streaming = true;
+        }
+        if (completeOutput.contains("raop_rtp_mirror->running is no longer true") ||
+            completeOutput.contains("Output window was closed")) {
+            m_streaming = false;
+            if (m_settingsRestartPending) {
+                QTimer::singleShot(500, this, [this]() {
+                    if (!m_quitting && !m_streaming &&
+                        m_settingsRestartPending) {
+                        restartEngineForSettings("Applying saved video settings.");
+                    }
+                });
+            }
+        }
+    }
+    if (m_engine == engine && m_engineWasReady &&
+        containsVideoPipelineFailure(completeOutput)) {
+        // The current renderer cannot recover this session; do not defer the
+        // compatibility restart behind a stream that is already broken.
+        m_streaming = false;
+        const QString reason = QString::fromLocal8Bit(completeOutput).trimmed();
+        if (fallbackToSoftwareRenderer(reason)) {
+            QTimer::singleShot(0, this, [this]() {
+                if (!m_quitting) {
+                    restartEngineForSettings(
+                        "Recovering from a failed video pipeline.");
+                }
+            });
+        }
+    }
     if (m_engine == engine && !m_running &&
         m_engineOutputBuffer.contains("Initialized server socket(s)")) {
         markEngineReady();
@@ -953,7 +1072,6 @@ void MainWindow::markEngineReady() {
     m_lastEngineFailure.clear();
     m_restartDelayMs = 1000;
     updateStatus();
-    if (m_windowMonitorTimer) m_windowMonitorTimer->start(500);
     qInfo() << "UxPlay engine is listening";
     QPointer<QProcess> readyEngine = m_engine;
     QTimer::singleShot(kMinimumHealthyLifetimeMs, this, [this, readyEngine]() {
@@ -1178,133 +1296,6 @@ void MainWindow::closeEvent(QCloseEvent *event) {
     }
 }
 
-bool MainWindow::nativeEvent(const QByteArray &eventType,
-                             void *message,
-                             qintptr *result) {
-    Q_UNUSED(eventType);
-    MSG *msg = static_cast<MSG *>(message);
-    if (msg && msg->message == WM_HOTKEY &&
-        msg->wParam == kAltEnterHotkeyId) {
-        HWND foreground = GetForegroundWindow();
-        DWORD foregroundPid = 0;
-        if (foreground) GetWindowThreadProcessId(foreground, &foregroundPid);
-        if (foregroundPid == static_cast<DWORD>(m_enginePid) ||
-            foreground == reinterpret_cast<HWND>(winId())) {
-            toggleVideoFullscreen();
-            if (result) *result = 0;
-            return true;
-        }
-    }
-    return QMainWindow::nativeEvent(eventType, message, result);
-}
-
-quintptr MainWindow::findVideoWindow() const {
-    if (!m_enginePid) return 0;
-    WindowSearchData search{};
-    search.pid = static_cast<DWORD>(m_enginePid);
-    EnumWindows(EnumWindowsProcFindVideo, reinterpret_cast<LPARAM>(&search));
-    return reinterpret_cast<quintptr>(search.window);
-}
-
-void MainWindow::monitorVideoWindow() {
-    if (!m_running || !m_enginePid) return;
-    const quintptr found = findVideoWindow();
-    if (!found) {
-        if (m_videoWindow &&
-            !IsWindow(reinterpret_cast<HWND>(m_videoWindow))) {
-            m_videoWindow = 0;
-            m_videoFullscreen = false;
-            m_windowedStyle = 0;
-            m_windowedRect = QRect();
-        }
-        return;
-    }
-
-    if (m_videoWindow != found) {
-        m_videoWindow = found;
-        m_videoFullscreen = false;
-        m_windowedStyle = 0;
-        m_windowedRect = QRect();
-        const QString title = "AirPlay Video Stream (Alt+Enter toggles fullscreen)";
-        SetWindowTextW(reinterpret_cast<HWND>(m_videoWindow),
-                       reinterpret_cast<const wchar_t *>(title.utf16()));
-        qInfo() << "Detected UxPlay video window:"
-                << QString("0x%1").arg(m_videoWindow, 0, 16);
-    }
-
-    if (m_fullscreenCheckbox && m_fullscreenCheckbox->isChecked() &&
-        !m_videoFullscreen) {
-        setVideoFullscreen(true);
-    }
-}
-
-void MainWindow::setVideoFullscreen(bool fullscreen) {
-    if (!m_videoWindow) m_videoWindow = findVideoWindow();
-    HWND window = reinterpret_cast<HWND>(m_videoWindow);
-    if (!window || !IsWindow(window)) {
-        m_videoWindow = 0;
-        m_videoFullscreen = false;
-        return;
-    }
-    if (fullscreen == m_videoFullscreen) return;
-
-    if (fullscreen) {
-        RECT rect{};
-        if (!GetWindowRect(window, &rect)) return;
-        m_windowedRect = QRect(rect.left, rect.top,
-                               rect.right - rect.left,
-                               rect.bottom - rect.top);
-        m_windowedStyle = GetWindowLongPtrW(window, GWL_STYLE);
-
-        MONITORINFO monitorInfo{};
-        monitorInfo.cbSize = sizeof(monitorInfo);
-        HMONITOR monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
-        if (!GetMonitorInfoW(monitor, &monitorInfo)) return;
-
-        SetWindowLongPtrW(window, GWL_STYLE,
-                          m_windowedStyle & ~static_cast<qintptr>(WS_OVERLAPPEDWINDOW));
-        SetWindowPos(window, HWND_TOP,
-                     monitorInfo.rcMonitor.left,
-                     monitorInfo.rcMonitor.top,
-                     monitorInfo.rcMonitor.right - monitorInfo.rcMonitor.left,
-                     monitorInfo.rcMonitor.bottom - monitorInfo.rcMonitor.top,
-                     SWP_FRAMECHANGED | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
-        m_videoFullscreen = true;
-    } else {
-        if (m_windowedStyle) {
-            SetWindowLongPtrW(window, GWL_STYLE, m_windowedStyle);
-        }
-        const QRect rect = m_windowedRect.isValid()
-            ? m_windowedRect
-            : QRect(100, 100, 1280, 720);
-        SetWindowPos(window, HWND_NOTOPMOST,
-                     rect.x(), rect.y(), rect.width(), rect.height(),
-                     SWP_FRAMECHANGED | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
-        m_videoFullscreen = false;
-    }
-    SetForegroundWindow(window);
-    qInfo() << "Video fullscreen:" << m_videoFullscreen;
-}
-
-void MainWindow::toggleVideoFullscreen() {
-    if (!m_videoWindow) m_videoWindow = findVideoWindow();
-    if (!m_videoWindow) {
-        if (m_tray) {
-            m_tray->showMessage("Fullscreen unavailable",
-                                "Start an AirPlay video stream first.",
-                                QSystemTrayIcon::Information, 2500);
-        }
-        return;
-    }
-    setVideoFullscreen(!m_videoFullscreen);
-    if (!m_videoFullscreen && m_fullscreenCheckbox &&
-        m_fullscreenCheckbox->isChecked()) {
-        QSignalBlocker blocker(m_fullscreenCheckbox);
-        m_fullscreenCheckbox->setChecked(false);
-        QSettings().setValue("force_fs_enabled", false);
-    }
-}
-
 void MainWindow::updateStatus() {
     QString status;
     if (m_starting) {
@@ -1348,9 +1339,6 @@ void MainWindow::updateStatus() {
     if (m_retryEngineAction) {
         m_retryEngineAction->setEnabled(!m_engine ||
                                         m_engine->state() == QProcess::NotRunning);
-    }
-    if (m_toggleFullscreenAction) {
-        m_toggleFullscreenAction->setEnabled(m_running);
     }
     m_autostartBtn->setText(isAutostartEnabled() ? "Open uxplay-windows on login: ON " : "Open uxplay-windows on login: OFF");
 }
