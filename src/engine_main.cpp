@@ -2,6 +2,8 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <thread>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -10,6 +12,18 @@
 
 namespace {
 bool g_highResolutionTimer = false;
+
+void supervisorControlLoop() {
+    char command[64] = {};
+    while (fgets(command, sizeof(command), stdin)) {
+        if (strncmp(command, "shutdown", 8) != 0) continue;
+
+        fprintf(stderr, "[engine-wrapper] graceful shutdown requested\n");
+        fflush(stderr);
+        stop_uxplay();
+        return;
+    }
+}
 
 void logNormalExit() {
 #ifdef _WIN32
@@ -49,5 +63,9 @@ int main(int argc, char *argv[]) {
 #endif
     std::atexit(logNormalExit);
     fprintf(stderr, "[engine-wrapper] starting uxplay engine\n");
+    // QProcess owns the child's stdin pipe. A small control thread lets the
+    // GUI invoke libuxplay's cleanup path without QProcess::terminate(), which
+    // sends WM_CLOSE to the GStreamer video window on Windows.
+    std::thread(supervisorControlLoop).detach();
     return start_uxplay(argc, argv);
 }

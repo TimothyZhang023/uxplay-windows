@@ -44,11 +44,11 @@ constexpr qint64 kMinimumHealthyLifetimeMs = 30000;
 bool containsVideoPipelineFailure(const QByteArray &output) {
     const QByteArray lower = output.toLower();
     if (lower.contains("failed to initialize gstreamer video renderer") ||
-           lower.contains("unable to construct a working video pipeline") ||
-           lower.contains("no element \"d3d11h264dec\"") ||
-           lower.contains("no element \"d3d11h265dec\"") ||
-           lower.contains("no element \"d3d12h264dec\"") ||
-           lower.contains("no element \"d3d12h265dec\"")) {
+        lower.contains("unable to construct a working video pipeline") ||
+        lower.contains("no element \"d3d11h264dec\"") ||
+        lower.contains("no element \"d3d11h265dec\"") ||
+        lower.contains("no element \"d3d12h264dec\"") ||
+        lower.contains("no element \"d3d12h265dec\"")) {
         return true;
     }
 
@@ -925,15 +925,18 @@ void MainWindow::stopServer() {
         m_engine.clear();
         disconnect(engine, nullptr, this, nullptr);
         if (engine->state() != QProcess::NotRunning) {
-            // QProcess::terminate() posts WM_CLOSE to every top-level child
-            // window on Windows. That closes the GStreamer D3D window first
-            // and creates the misleading "Output window was closed" failure.
-            // The engine is process-isolated, so stop it directly instead.
-            appendEngineLog(
-                "[supervisor] stopping isolated engine without WM_CLOSE\n");
-            engine->kill();
-            if (!engine->waitForFinished(2000)) {
-                qWarning() << "UxPlay engine did not exit after TerminateProcess";
+            // QProcess::terminate() posts WM_CLOSE to every child window on
+            // Windows, which closes the GStreamer output before the server.
+            // Ask the wrapper to run stop_uxplay() over its stdin control pipe.
+            appendEngineLog("[supervisor] requesting graceful engine shutdown\n");
+            const qint64 written = engine->write("shutdown\n");
+            if (written > 0) engine->waitForBytesWritten(500);
+            if (!engine->waitForFinished(3000)) {
+                qWarning() << "UxPlay engine did not shut down gracefully; killing it";
+                appendEngineLog(
+                    "[supervisor] graceful shutdown timed out; killing engine\n");
+                engine->kill();
+                engine->waitForFinished(1000);
             }
         }
         handleEngineOutput(engine);
