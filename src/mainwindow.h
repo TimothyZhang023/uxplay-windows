@@ -40,7 +40,9 @@ private slots:
     void retryEngine();
     void toggleBle(bool checked); // bluetooth
     void toggleForceFullscreen(bool checked);
+    void toggleLowLatency(bool checked);
     void onRendererChanged(int index);
+    void onQualityChanged(int index);
 
 
 private:
@@ -52,6 +54,9 @@ private:
     bool startBluetoothBeacon(const QString &path);
     void stopBluetoothBeacon();
     void applyRendererAndFullscreenArgs(QStringList &args);
+    void applyQualityAndLatencyArgs(QStringList &args);
+    void restartEngineForSettings(const QString &message);
+    bool fallbackToSoftwareRenderer(const QString &reason);
     void showDiscoveryFallbackWarning();
     void handleEngineOutput(QProcess *engine);
     void markEngineReady();
@@ -74,7 +79,9 @@ private:
 
     QCheckBox *m_bleCheckbox = nullptr;
     QCheckBox *m_fullscreenCheckbox = nullptr;
+    QCheckBox *m_lowLatencyCheckbox = nullptr;
     QComboBox *m_rendererCombo = nullptr;
+    QComboBox *m_qualityCombo = nullptr;
     QSystemTrayIcon *m_tray = nullptr;
     QMenu *m_trayMenu = nullptr;
     QAction *m_autostartAction = nullptr;
@@ -88,10 +95,10 @@ private:
     QPushButton *m_licenseBtn = nullptr;
     QPushButton *m_logsBtn = nullptr;
     QLabel *m_statusLabel = nullptr;
-    QTimer *m_windowMonitorTimer = nullptr;
 
     QPointer<QProcess> m_engine;
     QByteArray m_engineOutputBuffer;
+    QByteArray m_engineLineBuffer;
     QFile m_engineLogFile;
     quint64 m_enginePid = 0;
     qint64 m_engineStartedAtMs = 0;
@@ -104,6 +111,9 @@ private:
     bool m_bleAvailable = false;
     bool m_engineWasReady = false;
     bool m_engineRestartPending = false;
+    bool m_streaming = false;
+    bool m_settingsRestartPending = false;
+    bool m_rendererFallbackAttempted = false;
     bool m_registryRepairAttempted = false;
     int m_consecutiveEngineFailures = 0;
     QString m_lastEngineFailure;
